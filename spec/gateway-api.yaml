@@ -1,0 +1,279 @@
+openapi: "3.0.3"
+info:
+  title: Semblance Gateway API
+  version: "0.1.0"
+  description: Localhost API for agent access to the Semblance vault.
+  license:
+    name: MIT
+
+servers:
+  - url: http://127.0.0.1:7832
+    description: Local gateway
+
+paths:
+  /agents/register:
+    post:
+      summary: Initiate agent pairing
+      operationId: registerAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Human-readable agent name
+      responses:
+        "200":
+          description: Pairing initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent_id:
+                    type: string
+                  pairing_code:
+                    type: string
+                    description: 6-char alphanumeric code, expires in 5 minutes
+
+  /agents:
+    get:
+      summary: List registered agents
+      operationId: listAgents
+      security:
+        - agentToken: []
+      responses:
+        "200":
+          description: List of agents
+
+  /agents/{id}:
+    delete:
+      summary: Revoke agent
+      operationId: revokeAgent
+      security:
+        - agentToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Agent revoked
+
+  /sessions:
+    post:
+      summary: Request access session
+      operationId: createSession
+      security:
+        - agentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lens_id, purpose]
+              properties:
+                lens_id:
+                  type: string
+                purpose:
+                  type: string
+                  description: Free text declaring the purpose of access
+                requested_ttl:
+                  type: integer
+                  description: Requested session duration in minutes
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  session_token:
+                    type: string
+                  lens_id:
+                    type: string
+                  ttl:
+                    type: integer
+                  allowed_operations:
+                    type: array
+                    items:
+                      type: string
+
+  /sessions/{id}:
+    get:
+      summary: Get session details
+      operationId: getSession
+      security:
+        - sessionToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session details
+    delete:
+      summary: Revoke session
+      operationId: revokeSession
+      security:
+        - sessionToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Session revoked
+
+  /sessions/{id}/stream:
+    get:
+      summary: SSE activity stream
+      operationId: sessionStream
+      security:
+        - sessionToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Event stream
+
+  /query:
+    post:
+      summary: Execute policy-filtered retrieval
+      operationId: query
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_token, query]
+              properties:
+                session_token:
+                  type: string
+                query:
+                  type: string
+                top_k:
+                  type: integer
+                  default: 5
+                disclosure_override:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Query results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                  receipt_id:
+                    type: string
+                  tokens_used:
+                    type: integer
+
+  /receipts/{session_id}/finalize:
+    post:
+      summary: Finalize session receipt
+      operationId: finalizeReceipt
+      security:
+        - sessionToken: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Receipt finalized
+
+  /receipts/{id}:
+    get:
+      summary: Get receipt
+      operationId: getReceipt
+      security:
+        - sessionToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Receipt data
+
+  /receipts/{id}/export:
+    get:
+      summary: Export receipt as HTML/PDF
+      operationId: exportReceipt
+      security:
+        - sessionToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Exported receipt
+
+components:
+  securitySchemes:
+    agentToken:
+      type: http
+      scheme: bearer
+      description: Long-lived agent token obtained through pairing
+    sessionToken:
+      type: http
+      scheme: bearer
+      description: Session-scoped token with TTL
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message, code, retry]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        code:
+          type: string
+          enum:
+            - ERR_RATE_LIMIT
+            - ERR_UNAVAILABLE
+            - ERR_SESSION_EXPIRED
+            - ERR_INVALID_TOKEN
+            - ERR_POLICY_VIOLATION
+            - ERR_NOT_FOUND
+        retry:
+          type: boolean

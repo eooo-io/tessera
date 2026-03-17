@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://semblance.ai/schemas/lens-policy.json",
+  "title": "LensPolicy",
+  "description": "A reusable access policy defining what an agent can see and how.",
+  "type": "object",
+  "required": ["id", "name", "space_ids", "disclosure_mode", "operations"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "space_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "space_exclude_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "tag_include": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "tag_exclude": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "content_types": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "disclosure_mode": {
+      "type": "string",
+      "enum": ["summary", "excerpt", "full"]
+    },
+    "max_quote_chars": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "allow_metadata": {
+      "type": "boolean",
+      "default": true
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["answer", "draft", "extract", "cite"]
+      },
+      "minItems": 1
+    },
+    "sensitivity_ceiling": {
+      "type": "string",
+      "enum": ["public", "internal", "confidential", "restricted"],
+      "default": "internal"
+    },
+    "approval_rule": {
+      "type": "string",
+      "enum": ["never", "always", "on_sensitive"],
+      "default": "on_sensitive"
+    },
+    "default_ttl_minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 60
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

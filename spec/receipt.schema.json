@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://semblance.ai/schemas/receipt.json",
+  "title": "Receipt",
+  "description": "Immutable record of what was accessed during a session.",
+  "type": "object",
+  "required": ["receipt_id", "session_id", "agent", "lens", "purpose", "started_at", "queries", "summary"],
+  "properties": {
+    "receipt_id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "agent": {
+      "type": "object",
+      "required": ["agent_id", "name"],
+      "properties": {
+        "agent_id": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "lens": {
+      "type": "object",
+      "required": ["lens_id", "name"],
+      "properties": {
+        "lens_id": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "purpose": { "type": "string" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": ["string", "null"], "format": "date-time" },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["query_id", "timestamp", "query_text", "artifacts_accessed"],
+        "properties": {
+          "query_id": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "query_text": { "type": "string" },
+          "artifacts_accessed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["artifact_id", "artifact_title", "disclosure_mode", "bytes_disclosed"],
+              "properties": {
+                "artifact_id": { "type": "string" },
+                "artifact_title": { "type": "string" },
+                "disclosure_mode": { "type": "string" },
+                "bytes_disclosed": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_queries", "unique_artifacts_accessed", "total_bytes_disclosed", "disclosure_modes_used"],
+      "properties": {
+        "total_queries": { "type": "integer" },
+        "unique_artifacts_accessed": { "type": "integer" },
+        "total_bytes_disclosed": { "type": "integer" },
+        "disclosure_modes_used": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "timestamp": { "type": "string", "format": "date-time" },
+          "action": { "type": "string" },
+          "user_action": { "type": "string" }
+        }
+      }
+    }
+  }
+}

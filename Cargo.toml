@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/semblance-core",
+    "crates/semblance-gateway",
+    "crates/semblance-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/eooo-io/semblance-ai"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+
+# Crypto
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+blake3 = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP / API
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Embedding / ML
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+ndarray = "0.16"
+
+# Text extraction
+pdf-extract = "0.7"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# ID generation
+ulid = "1"
+
+# JWT for session tokens
+jsonwebtoken = "9"
+
+# SSE for activity stream
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tokio-stream = "0.1"
+
+# macOS Keychain
+security-framework = "3"
+
+# Dev / testing
+tempfile = "3"
+proptest = "1"
+assert_cmd = "2"
+predicates = "3"
+tokio-test = "0.4"
