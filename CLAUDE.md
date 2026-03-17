@@ -29,6 +29,7 @@ cargo clippy -- -D warnings        # lint
 - **Error handling**: `thiserror` for library errors in core, `anyhow` in binary crates.
 - **IDs**: ULID strings prefixed with type (e.g., `space_01HXYZ...`, `art_01HXYZ...`).
 - **Database**: SQLite via rusqlite. WAL mode. Migrations in `crates/semblance-core/src/db/migrations/`.
+- **Vector index**: sqlite-vec (SQLite extension). Vectors live in the same database as metadata, enabling policy-filtered retrieval in a single SQL query. `VectorIndex` trait allows swapping to Qdrant/pgvector for v1.
 - **Tests**: Unit tests in `#[cfg(test)] mod tests` at the bottom of each module. Integration tests in `tests/integration/`. Property-based tests with `proptest` for policy evaluation and crypto.
 - **Naming**: snake_case for files/modules. PascalCase for structs/enums/variants.
 - **Public API**: Each module directory has `mod.rs` with the public surface. `lib.rs` re-exports top-level types.

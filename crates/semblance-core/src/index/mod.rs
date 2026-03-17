@@ -1,6 +1,7 @@
 //! Vector index trait and implementations.
 //!
-//! Default: HNSW index for approximate nearest neighbor search.
+//! Default implementation: sqlite-vec — vectors stored in the same SQLite
+//! database as metadata, enabling policy-filtered retrieval in a single query.
 
 use std::path::Path;
 use thiserror::Error;

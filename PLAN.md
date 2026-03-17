@@ -32,12 +32,11 @@ See `specs/Semblance-MVP-Plan-v2.md` for full technical specification.
 
 **Exit criteria**: Queryable chunk corpus exists. Extraction is deterministic.
 
-## Iteration 3: Embeddings and HNSW Index
+## Iteration 3: Embeddings and Vector Index
 - [ ] `EmbeddingProvider` trait + ONNX MiniLM-L6-v2 implementation
-- [ ] `VectorIndex` trait + HNSW implementation
+- [ ] `VectorIndex` trait + sqlite-vec implementation (vectors in same SQLite DB)
 - [ ] Embedding pipeline (chunk → vector → index)
-- [ ] Vector ID ↔ chunk ID mapping in SQLite
-- [ ] Index persistence and reload
+- [ ] Vector ID ↔ chunk ID mapping
 - [ ] Model version tracking for future reindexing
 
 **Exit criteria**: 10k+ chunks indexed. Query returns relevant chunks < 100ms. Recall@10 > 0.70 on golden set.
@@ -45,7 +44,7 @@ See `specs/Semblance-MVP-Plan-v2.md` for full technical specification.
 ## Iteration 4: Lens Policies and Policy-Filtered Retrieval
 - [ ] LensPolicy model and CRUD
 - [ ] Policy evaluation engine
-- [ ] Post-retrieval filtering (over-fetch + filter strategy for HNSW)
+- [ ] Policy-filtered retrieval via SQL WHERE clauses (sqlite-vec enables single-query filtering)
 - [ ] Space isolation enforcement
 - [ ] Tag include/exclude, content type, sensitivity ceiling filtering
 
