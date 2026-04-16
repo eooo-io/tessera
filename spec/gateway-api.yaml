@@ -1,8 +1,8 @@
 openapi: "3.0.3"
 info:
-  title: Semblance Gateway API
+  title: Tessera Gateway API
   version: "0.1.0"
-  description: Localhost API for agent access to the Semblance vault.
+  description: Localhost API for agent access to the Tessera vault.
   license:
     name: MIT
 

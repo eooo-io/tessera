@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://semblance.ai/schemas/lens-policy.json",
+  "$id": "https://tessera.ai/schemas/lens-policy.json",
   "title": "LensPolicy",
   "description": "A reusable access policy defining what an agent can see and how.",
   "type": "object",

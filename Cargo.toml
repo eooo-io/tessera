@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/semblance-core",
-    "crates/semblance-gateway",
-    "crates/semblance-cli",
+    "crates/tessera-core",
+    "crates/tessera-gateway",
+    "crates/tessera-cli",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/eooo-io/semblance-ai"
+repository = "https://github.com/eooo-io/tessera"
 
 [workspace.dependencies]
 # Serialization

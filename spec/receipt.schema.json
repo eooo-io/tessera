@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://semblance.ai/schemas/receipt.json",
+  "$id": "https://tessera.ai/schemas/receipt.json",
   "title": "Receipt",
   "description": "Immutable record of what was accessed during a session.",
   "type": "object",

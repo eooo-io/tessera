@@ -2,16 +2,16 @@
 
 ## Project
 
-Semblance AI — Rust monorepo for a Mac-first personal context vault with policy-gated semantic retrieval.
+Tessera — Rust monorepo for a Mac-first personal context vault with policy-gated semantic retrieval.
 
 ## Structure
 
-- `crates/semblance-core/` — library crate (all domain logic)
-- `crates/semblance-gateway/` — binary crate (localhost HTTP daemon)
-- `crates/semblance-cli/` — binary crate (CLI, ships as `semblance`)
+- `crates/tessera-core/` — library crate (all domain logic)
+- `crates/tessera-gateway/` — binary crate (localhost HTTP daemon)
+- `crates/tessera-cli/` — binary crate (CLI, ships as `tessera`)
 - `mac/` — SwiftUI Mac app (placeholder)
 - `spec/` — OpenAPI spec, JSON schemas
-- `specs/` — Product specs and MVP plan (source of truth for domain design)
+- `Tessera-MVP-Plan-v3.md` — Authoritative MVP plan (source of truth for domain design)
 - `tests/` — Integration tests and fixtures
 
 ## Build & Test
@@ -19,7 +19,7 @@ Semblance AI — Rust monorepo for a Mac-first personal context vault with polic
 ```bash
 cargo build                        # build all
 cargo test                         # test all
-cargo test -p semblance-core       # test core only
+cargo test -p tessera-core         # test core only
 cargo fmt --check                  # format check
 cargo clippy -- -D warnings        # lint
 ```
@@ -28,7 +28,7 @@ cargo clippy -- -D warnings        # lint
 
 - **Error handling**: `thiserror` for library errors in core, `anyhow` in binary crates.
 - **IDs**: ULID strings prefixed with type (e.g., `space_01HXYZ...`, `art_01HXYZ...`).
-- **Database**: SQLite via rusqlite. WAL mode. Migrations in `crates/semblance-core/src/db/migrations/`.
+- **Database**: SQLite via rusqlite. WAL mode. Migrations in `crates/tessera-core/src/db/migrations/`.
 - **Vector index**: sqlite-vec (SQLite extension). Vectors live in the same database as metadata, enabling policy-filtered retrieval in a single SQL query. `VectorIndex` trait allows swapping to Qdrant/pgvector for v1.
 - **Tests**: Unit tests in `#[cfg(test)] mod tests` at the bottom of each module. Integration tests in `tests/integration/`. Property-based tests with `proptest` for policy evaluation and crypto.
 - **Naming**: snake_case for files/modules. PascalCase for structs/enums/variants.
@@ -40,4 +40,4 @@ cargo clippy -- -D warnings        # lint
 
 ## Spec Reference
 
-The authoritative spec for domain types, schemas, APIs, and iteration sequencing is `specs/Semblance-MVP-Plan-v2.md`.
+The authoritative spec for domain types, schemas, APIs, and iteration sequencing is `Tessera-MVP-Plan-v3.md`.

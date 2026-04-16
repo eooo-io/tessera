@@ -1,6 +1,6 @@
-# Semblance AI — Development Roadmap
+# Tessera — Development Roadmap
 
-See `specs/Semblance-MVP-Plan-v2.md` for full technical specification.
+See `Tessera-MVP-Plan-v3.md` for full technical specification.
 
 ## Iteration 0: Scaffolding
 - [x] Repo cleanup — remove legacy files, submodules
@@ -90,7 +90,7 @@ See `specs/Semblance-MVP-Plan-v2.md` for full technical specification.
 - [ ] Security audit (encryption, policy enforcement, token handling)
 - [ ] macOS code signing and notarization
 - [ ] DMG packaging with first-run experience
-- [ ] `semblance diag` diagnostics command
+- [ ] `tessera diag` diagnostics command
 - [ ] Schema versioning for vault migration
 
 **Exit criteria**: Fresh install works on macOS 13+. All performance budgets met. No P0 bugs.

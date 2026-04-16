@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# Node (should not appear in this repo, but guard against accidental install)
+node_modules/
+
 # IDE
 .idea/
 .vscode/
