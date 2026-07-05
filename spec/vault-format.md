@@ -89,9 +89,12 @@ tool, tool version, `local`/`cloud` locality). Migration 0002 adds
 extractor-version, enabling skip-if-unchanged and re-run-on-upgrade).
 Migration 0003 adds `chunks` (byte ranges into the derived text, always on
 UTF-8 char boundaries, with per-chunk content hash for citation integrity).
-Later milestones append embeddings (sqlite-vec virtual table), lenses,
-sessions, and the receipts index. The database never contains plaintext
-artifact content.
+Migration 0005 adds vector storage: `chunk_embeddings` (a sqlite-vec `vec0`
+virtual table, `float[384]`; readers MUST register the sqlite-vec extension
+before opening) and `embeddings_map` (chunk ↔ vec rowid, producing model
+version — mixed model versions in one vault are refused at query time).
+Later milestones append lenses, sessions, and the receipts index. The
+database never contains plaintext artifact content.
 
 ## 4. `keyslot.bin`
 

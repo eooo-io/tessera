@@ -15,9 +15,25 @@ pub enum DbError {
     QueryFailed(#[from] rusqlite::Error),
 }
 
-/// Open (or create) the vault database: WAL mode, foreign keys on, all
-/// pending migrations applied.
+/// Register the sqlite-vec extension for every future connection in this
+/// process. Idempotent; the unsafe block is the crate's documented pattern.
+fn register_vec_extension() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        type InitFn = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *const std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        let init: InitFn = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
+        rusqlite::ffi::sqlite3_auto_extension(Some(init));
+    });
+}
+
+/// Open (or create) the vault database: sqlite-vec available, WAL mode,
+/// foreign keys on, all pending migrations applied.
 pub fn open_database(path: &Path) -> Result<Connection, DbError> {
+    register_vec_extension();
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;

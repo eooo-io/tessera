@@ -8,7 +8,11 @@
 //! future remote backend (Qdrant, pgvector) implements its own filtered
 //! search behind the same signature.
 
+pub mod sqlite_vec;
+
 use thiserror::Error;
+
+pub use sqlite_vec::SqliteVecIndex;
 
 use crate::artifact::{ArtifactId, Sensitivity};
 use crate::space::SpaceId;
@@ -46,7 +50,12 @@ pub struct ChunkRef {
 }
 
 /// Trait for vector index implementations — allows swapping backends.
-pub trait VectorIndex: Send + Sync {
+///
+/// Implementations are not required to be thread-safe: SQLite connections
+/// are single-threaded by design, and concurrency is handled one level up
+/// (each guardian session opens its own vault handle; WAL supports
+/// concurrent connections).
+pub trait VectorIndex {
     /// Insert (or replace) the embedding for a chunk.
     fn insert(&mut self, chunk_id: &str, embedding: &[f32]) -> Result<(), IndexError>;
 
