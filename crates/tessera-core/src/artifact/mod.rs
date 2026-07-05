@@ -172,20 +172,56 @@ pub fn record_version(
     })
 }
 
-/// Change an artifact's quarantine state.
+/// Change an artifact's quarantine state. The audit row is written in the
+/// same transaction as the change.
 pub fn set_state(
     vault: &Vault,
     artifact: &ArtifactId,
     state: ArtifactState,
 ) -> Result<(), ArtifactError> {
-    let changed = vault.conn().execute(
-        "UPDATE artifacts SET state = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![state.as_str(), chrono::Utc::now().to_rfc3339(), artifact.0],
-    )?;
-    if changed == 0 {
-        return Err(ArtifactError::NotFound(artifact.0.clone()));
+    let conn = vault.conn();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute_batch("BEGIN")?;
+    let result: Result<(), ArtifactError> = (|| {
+        let from_state: String = conn
+            .query_row(
+                "SELECT state FROM artifacts WHERE id = ?1",
+                [artifact.0.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => ArtifactError::NotFound(artifact.0.clone()),
+                other => ArtifactError::Database(other),
+            })?;
+        conn.execute(
+            "UPDATE artifacts SET state = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![state.as_str(), now, artifact.0],
+        )?;
+        conn.execute(
+            "INSERT INTO state_transitions (id, artifact_id, from_state, to_state, actor, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'owner', ?5)",
+            rusqlite::params![
+                format!("strn_{}", ulid::Ulid::new()),
+                artifact.0,
+                from_state,
+                state.as_str(),
+                now
+            ],
+        )?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 const ARTIFACT_COLS: &str =
@@ -372,6 +408,43 @@ mod tests {
         assert_eq!(
             get(&vault, &id).expect("get").state,
             ArtifactState::Archived
+        );
+    }
+
+    #[test]
+    fn state_changes_are_audited() {
+        let (_dir, vault, space) = test_vault_with_space();
+        let id = register(
+            &vault,
+            &space,
+            "f.txt",
+            "text/plain",
+            Sensitivity::default(),
+        )
+        .expect("register");
+
+        set_state(&vault, &id, ArtifactState::Live).expect("to live");
+        set_state(&vault, &id, ArtifactState::Archived).expect("to archived");
+
+        let mut stmt = vault
+            .conn()
+            .prepare(
+                "SELECT from_state, to_state, actor FROM state_transitions
+                 WHERE artifact_id = ?1 ORDER BY created_at, id",
+            )
+            .expect("prepare");
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([id.0.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+
+        assert_eq!(
+            rows,
+            vec![
+                ("pending".into(), "live".into(), "owner".into()),
+                ("live".into(), "archived".into(), "owner".into()),
+            ]
         );
     }
 

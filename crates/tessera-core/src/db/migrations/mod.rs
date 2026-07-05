@@ -12,6 +12,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_initial", include_str!("0001_initial.sql")),
     ("0002_derived_text", include_str!("0002_derived_text.sql")),
     ("0003_chunks", include_str!("0003_chunks.sql")),
+    (
+        "0004_state_transitions",
+        include_str!("0004_state_transitions.sql"),
+    ),
 ];
 
 /// Number of migrations this build knows about.
