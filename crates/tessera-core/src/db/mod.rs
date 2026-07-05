@@ -2,6 +2,9 @@
 
 pub mod migrations;
 
+use std::path::Path;
+
+use rusqlite::Connection;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -12,7 +15,165 @@ pub enum DbError {
     QueryFailed(#[from] rusqlite::Error),
 }
 
+/// Open (or create) the vault database: WAL mode, foreign keys on, all
+/// pending migrations applied.
+pub fn open_database(path: &Path) -> Result<Connection, DbError> {
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    migrations::run_migrations(&conn)?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
-    // Tests will be added in Iteration 1.
+    use super::*;
+
+    fn open_temp() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_database(&dir.path().join("vault.db")).expect("open");
+        (dir, conn)
+    }
+
+    #[test]
+    fn open_enables_wal_and_foreign_keys() {
+        let (_dir, conn) = open_temp();
+
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("journal_mode");
+        assert_eq!(journal.to_lowercase(), "wal");
+
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .expect("foreign_keys");
+        assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn migrations_create_expected_tables() {
+        let (_dir, conn) = open_temp();
+
+        for table in [
+            "schema_migrations",
+            "spaces",
+            "artifacts",
+            "artifact_versions",
+            "tags",
+            "artifact_tags",
+            "provenance",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .expect("query sqlite_master");
+            assert_eq!(count, 1, "missing table: {table}");
+        }
+    }
+
+    #[test]
+    fn migrations_are_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.db");
+
+        let schema_dump = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT COALESCE(sql, '') FROM sqlite_master ORDER BY name")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .expect("query")
+                .map(|r| r.expect("row"))
+                .collect()
+        };
+
+        let conn = open_database(&path).expect("first open");
+        let first = schema_dump(&conn);
+        let applied_first: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
+            .expect("count");
+        drop(conn);
+
+        let conn = open_database(&path).expect("second open");
+        let second = schema_dump(&conn);
+        let applied_second: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
+            .expect("count");
+
+        assert_eq!(first, second, "schema changed on re-open");
+        assert_eq!(applied_first, applied_second, "migrations re-applied");
+    }
+
+    #[test]
+    fn schema_version_matches_migration_count() {
+        let (_dir, conn) = open_temp();
+        let version = migrations::schema_version(&conn).expect("version");
+        assert_eq!(version as usize, migrations::migration_count());
+        assert!(version >= 1);
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced() {
+        let (_dir, conn) = open_temp();
+
+        let result = conn.execute(
+            "INSERT INTO artifacts (id, space_id, filename, media_type, created_at, updated_at)
+             VALUES ('art_x', 'space_missing', 'f.txt', 'text/plain', '2026-07-05', '2026-07-05')",
+            [],
+        );
+        assert!(result.is_err(), "insert with dangling space_id succeeded");
+    }
+
+    #[test]
+    fn artifact_state_is_constrained_and_defaults_to_pending() {
+        let (_dir, conn) = open_temp();
+
+        conn.execute(
+            "INSERT INTO spaces (id, name, created_at, updated_at)
+             VALUES ('space_a', 'A', '2026-07-05', '2026-07-05')",
+            [],
+        )
+        .expect("insert space");
+
+        conn.execute(
+            "INSERT INTO artifacts (id, space_id, filename, media_type, created_at, updated_at)
+             VALUES ('art_a', 'space_a', 'f.txt', 'text/plain', '2026-07-05', '2026-07-05')",
+            [],
+        )
+        .expect("insert artifact");
+        let state: String = conn
+            .query_row("SELECT state FROM artifacts WHERE id = 'art_a'", [], |r| {
+                r.get(0)
+            })
+            .expect("select state");
+        assert_eq!(state, "pending", "new artifacts must start quarantined");
+
+        let bad = conn.execute(
+            "INSERT INTO artifacts (id, space_id, filename, media_type, state, created_at, updated_at)
+             VALUES ('art_b', 'space_a', 'g.txt', 'text/plain', 'visible', '2026-07-05', '2026-07-05')",
+            [],
+        );
+        assert!(bad.is_err(), "invalid state value accepted");
+    }
+
+    #[test]
+    fn provenance_locality_is_constrained() {
+        let (_dir, conn) = open_temp();
+
+        let bad = conn.execute(
+            "INSERT INTO provenance (id, derived_blob_hash, tool, locality, created_at)
+             VALUES ('prov_x', 'abc', 'extractor', 'mainframe', '2026-07-05')",
+            [],
+        );
+        assert!(bad.is_err(), "invalid locality accepted");
+
+        conn.execute(
+            "INSERT INTO provenance (id, derived_blob_hash, tool, locality, created_at)
+             VALUES ('prov_y', 'abc', 'extractor', 'local', '2026-07-05')",
+            [],
+        )
+        .expect("valid provenance row");
+    }
 }

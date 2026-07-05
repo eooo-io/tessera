@@ -74,15 +74,19 @@ additional unknown fields; it MUST NOT drop them.
 
 ## 3. `vault.db`
 
-SQLite database in WAL mode. Schema and migrations are defined in
-`tessera-core/src/db/migrations/` and versioned by a `schema_version` table
-(§ to be specified in the migrations issue, M1). The database contains
-metadata, chunks, embeddings (sqlite-vec virtual table), lenses, sessions,
-the receipts index, quarantine states, and provenance — but never plaintext
-artifact content.
+SQLite database in WAL mode with foreign keys enforced. Schema is defined by
+ordered migrations in `tessera-core/src/db/migrations/` (never edited once
+shipped — append-only) and recorded in a `schema_migrations` table
+(`version`, `name`, `applied_at`). Readers open with
+`open_database`, which applies pending migrations transactionally.
 
-*Status: schema not yet implemented; this section is completed by the
-migrations issue (#4).*
+Migration 0001 establishes: `spaces`, `artifacts` (with `sensitivity` and
+the quarantine `state` column — `pending`/`live`/`archived`, CHECK-enforced,
+default `pending`), `artifact_versions` (→ `blob_hash` into §5),
+`tags`/`artifact_tags`, and `provenance` (derived blob → source version,
+tool, tool version, `local`/`cloud` locality). Later milestones append
+chunks, embeddings (sqlite-vec virtual table), lenses, sessions, and the
+receipts index. The database never contains plaintext artifact content.
 
 ## 4. `keyslot.bin`
 
