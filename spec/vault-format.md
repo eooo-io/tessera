@@ -87,9 +87,11 @@ default `pending`), `artifact_versions` (→ `blob_hash` into §5),
 tool, tool version, `local`/`cloud` locality). Migration 0002 adds
 `derived_text` (extraction outputs: one row per version × extractor ×
 extractor-version, enabling skip-if-unchanged and re-run-on-upgrade).
-Later milestones append chunks, embeddings (sqlite-vec virtual table),
-lenses, sessions, and the receipts index. The database never contains
-plaintext artifact content.
+Migration 0003 adds `chunks` (byte ranges into the derived text, always on
+UTF-8 char boundaries, with per-chunk content hash for citation integrity).
+Later milestones append embeddings (sqlite-vec virtual table), lenses,
+sessions, and the receipts index. The database never contains plaintext
+artifact content.
 
 ## 4. `keyslot.bin`
 
