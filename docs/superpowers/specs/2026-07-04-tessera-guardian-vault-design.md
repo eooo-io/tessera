@@ -128,10 +128,10 @@ Media matrix (v1):
 3. **M3 — Embeddings & retrieval:** ONNX embedding provider, sqlite-vec index, model registry, `query` CLI, golden-set eval harness.
 4. **M4 — Lenses & policy-filtered retrieval:** lens CRUD, single-query filtered search, isolation/property tests.
 5. **M5 — Disclosure, summaries & receipts:** local summarizer, disclosure renderer, citations, hash-chained receipts. **v0.0 decision gate.**
-6. **M6 — Multimodal:** conversation importers (Claude Code/Claude/ChatGPT), turn-aware chunking, images (OCR + VLM captions), web clipper, transcripts.
-7. **M7 — Guardian:** MCP server (stdio first, then HTTP+OAuth), sessions, receipt finalization, revocation, rate limiting, MCP integration tests.
+6. **M6 — Guardian:** MCP server (stdio first, then HTTP+OAuth), sessions, receipt finalization, revocation, rate limiting, MCP integration tests.
+7. **M7 — Multimodal:** conversation importers (Claude Code/Claude/ChatGPT), turn-aware chunking, images (OCR + VLM captions), web clipper, transcripts.
 
-M6 and M7 are intentionally swappable: if agent access to the text corpus matters sooner than images/conversations, M7 can precede M6.
+Ordering decided 2026-07-05: agent access to the text corpus (Guardian) lands before multimodal ingestion. **First stable version (v0.1.0) = M1–M6.** M7 follows as v0.2.0.
 
 ## Explicit non-goals (v1)
 
