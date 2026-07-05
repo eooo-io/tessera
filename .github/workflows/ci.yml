@@ -32,6 +32,20 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # ort-sys links -lclang_rt.osx (compiler-rt builtins for the static
+      # onnxruntime binary); newer Xcode toolchains don't expose it on the
+      # default linker search path. Locate it and append its directory.
+      - name: Locate clang runtime for ort-sys
+        run: |
+          lib=$(find "$(xcode-select -p)" /Library/Developer/CommandLineTools \
+                -name 'libclang_rt.osx.a' 2>/dev/null | head -1)
+          if [ -n "$lib" ]; then
+            echo "found: $lib"
+            echo "RUSTFLAGS=-D warnings -L $(dirname "$lib")" >> "$GITHUB_ENV"
+          else
+            echo "::warning::libclang_rt.osx.a not found on runner"
+          fi
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
