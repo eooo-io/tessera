@@ -39,6 +39,16 @@ pub enum Command {
         /// Files to import
         paths: Vec<std::path::PathBuf>,
     },
+    /// Embed any chunks that don't have vectors yet
+    Index,
+    /// Semantic search over the vault (owner view: everything live)
+    Query {
+        /// The question or search text
+        text: String,
+        /// Number of results
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+    },
     /// Manage local models
     Model {
         #[command(subcommand)]
@@ -129,6 +139,12 @@ fn kdf_params() -> KdfParams {
 fn open_vault(path: &std::path::Path) -> anyhow::Result<Vault> {
     let pass = passphrase()?;
     Vault::open(path, &pass).with_context(|| format!("opening vault at {}", path.display()))
+}
+
+fn load_embedder() -> anyhow::Result<tessera_core::embed::OnnxEmbedder> {
+    let dir = tessera_core::embed::onnx::default_model_dir();
+    tessera_core::embed::OnnxEmbedder::load(&dir)
+        .context("loading embedding model (run `tessera model fetch` first)")
 }
 
 /// Resolve the target space: explicit flag, else the sole existing space.
@@ -356,6 +372,39 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     )?;
                     println!("{} → live", id.0);
                 }
+            }
+            Ok(())
+        }
+        Command::Index => {
+            let vault = open_vault(&vault_path)?;
+            let embedder = load_embedder()?;
+            let count = tessera_core::search::embed_missing(&vault, &embedder)?;
+            println!("Embedded {count} chunk(s).");
+            Ok(())
+        }
+        Command::Query { text, top_k } => {
+            let vault = open_vault(&vault_path)?;
+            let embedder = load_embedder()?;
+            let results = tessera_core::search::query(
+                &vault,
+                &embedder,
+                &text,
+                &tessera_core::search::owner_constraints(),
+                top_k,
+            )?;
+            if results.is_empty() {
+                println!("No results.");
+            }
+            for (rank, r) in results.iter().enumerate() {
+                println!(
+                    "{}. {}  (score {:.3})\n   {}  bytes {}..{}",
+                    rank + 1,
+                    r.artifact_title,
+                    r.relevance_score,
+                    r.chunk_id,
+                    r.byte_range.0,
+                    r.byte_range.1
+                );
             }
             Ok(())
         }
