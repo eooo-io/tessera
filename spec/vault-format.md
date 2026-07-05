@@ -122,8 +122,21 @@ of its **plaintext**, stored at `blobs/<first two hex chars>/<full hash>`.
 Contents on disk are XChaCha20-Poly1305-encrypted with the DEK and a unique
 random 24-byte nonce. Identical plaintext is stored once (deduplication).
 
-*Status: encrypted container framing (nonce placement, AAD) not yet
-implemented; this section is completed by the blob-store issue (#3).*
+On-disk container framing:
+
+```
+offset  size  field
+0       24    XChaCha20-Poly1305 nonce (random, unique per blob write)
+24      n+16  ciphertext + Poly1305 tag
+```
+
+The AEAD associated data (AAD) is the blob's address (the lowercase hex hash
+string, ASCII bytes). This binds each container to its address: copying a
+valid container to a different address fails authentication. Readers MUST
+verify the AEAD tag and SHOULD additionally recompute the BLAKE3 hash of the
+decrypted plaintext against the address (defense in depth; implemented).
+Writes are atomic (temp file + rename). Implemented in
+`tessera-core/src/blob/mod.rs`.
 
 ## 6. `receipts/`
 
