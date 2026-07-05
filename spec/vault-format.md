@@ -84,9 +84,12 @@ Migration 0001 establishes: `spaces`, `artifacts` (with `sensitivity` and
 the quarantine `state` column — `pending`/`live`/`archived`, CHECK-enforced,
 default `pending`), `artifact_versions` (→ `blob_hash` into §5),
 `tags`/`artifact_tags`, and `provenance` (derived blob → source version,
-tool, tool version, `local`/`cloud` locality). Later milestones append
-chunks, embeddings (sqlite-vec virtual table), lenses, sessions, and the
-receipts index. The database never contains plaintext artifact content.
+tool, tool version, `local`/`cloud` locality). Migration 0002 adds
+`derived_text` (extraction outputs: one row per version × extractor ×
+extractor-version, enabling skip-if-unchanged and re-run-on-upgrade).
+Later milestones append chunks, embeddings (sqlite-vec virtual table),
+lenses, sessions, and the receipts index. The database never contains
+plaintext artifact content.
 
 ## 4. `keyslot.bin`
 

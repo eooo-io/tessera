@@ -23,8 +23,9 @@ chrono = { workspace = true }
 ulid = { workspace = true }
 security-framework = { workspace = true }
 zeroize = { workspace = true }
+# runtime use: temp files for pandoc DOCX interop (extract module)
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio-test = { workspace = true }

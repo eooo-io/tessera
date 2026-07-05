@@ -8,7 +8,10 @@ use rusqlite::Connection;
 use super::DbError;
 
 /// Ordered list of (name, SQL) migrations.
-const MIGRATIONS: &[(&str, &str)] = &[("0001_initial", include_str!("0001_initial.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_initial", include_str!("0001_initial.sql")),
+    ("0002_derived_text", include_str!("0002_derived_text.sql")),
+];
 
 /// Number of migrations this build knows about.
 pub fn migration_count() -> usize {
