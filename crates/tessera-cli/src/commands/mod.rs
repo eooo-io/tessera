@@ -18,7 +18,11 @@ pub enum Command {
         action: SpaceCommand,
     },
     /// Show vault diagnostics
-    Diag,
+    Diag {
+        /// Print the provenance chain for one artifact
+        #[arg(long)]
+        artifact: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -119,13 +123,43 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Diag => {
+        Command::Diag { artifact } => {
             println!("tessera v{}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "pandoc: {}",
+                if tessera_core::extract::pandoc_available() {
+                    "available"
+                } else {
+                    "missing (DOCX extraction disabled)"
+                }
+            );
             match Vault::open(&vault_path, &passphrase()?) {
                 Ok(vault) => {
                     println!("vault: {}", vault.path().display());
                     println!("format_version: {}", vault.manifest().format_version);
                     println!("spaces: {}", space::list(&vault)?.len());
+                    let orphans = tessera_core::provenance::orphaned_derivations(&vault)?;
+                    println!(
+                        "provenance: {}",
+                        if orphans.is_empty() {
+                            "ok (no orphaned derivations)".to_string()
+                        } else {
+                            format!("⚠ {} orphaned derivation(s)", orphans.len())
+                        }
+                    );
+                    if let Some(id) = artifact {
+                        let artifact_id = tessera_core::ArtifactId(id);
+                        println!("provenance chain:");
+                        for rec in tessera_core::provenance::chain_for(&vault, &artifact_id)? {
+                            println!(
+                                "  {} ← {} ({}, {})",
+                                rec.derived_blob_hash,
+                                rec.tool,
+                                rec.tool_version.as_deref().unwrap_or("?"),
+                                rec.locality
+                            );
+                        }
+                    }
                 }
                 Err(e) => println!("vault: unavailable ({e})"),
             }
