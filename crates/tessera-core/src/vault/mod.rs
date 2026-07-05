@@ -51,7 +51,11 @@ impl From<CryptoError> for VaultError {
 pub struct Vault {
     path: PathBuf,
     manifest: VaultManifest,
+    // dead_code allows: consumed by spaces/artifact modules from issue #6 on;
+    // until then only tests read these.
+    #[allow(dead_code)]
     conn: Connection,
+    #[allow(dead_code)]
     blobs: BlobStore,
     dek: Option<Dek>,
 }
@@ -131,6 +135,7 @@ impl Vault {
     }
 
     /// The unlocked DEK, or `VaultError::Locked`.
+    #[allow(dead_code)] // consumed from issue #6 on
     pub(crate) fn dek(&self) -> Result<&Dek, VaultError> {
         self.dek.as_ref().ok_or(VaultError::Locked)
     }
@@ -146,11 +151,13 @@ impl Vault {
     }
 
     /// The vault database connection.
+    #[allow(dead_code)] // consumed from issue #6 on
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
 
     /// The encrypted blob store.
+    #[allow(dead_code)] // consumed from issue #6 on
     pub(crate) fn blobs(&self) -> &BlobStore {
         &self.blobs
     }
