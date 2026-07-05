@@ -17,11 +17,50 @@ pub enum Command {
         #[command(subcommand)]
         action: SpaceCommand,
     },
+    /// Stage and ingest content
+    Inbox {
+        #[command(subcommand)]
+        action: InboxCommand,
+    },
+    /// Review quarantined artifacts
+    Review {
+        /// Accept every pending artifact without prompting
+        #[arg(long)]
+        accept_all: bool,
+    },
+    /// Stage, ingest, and (with --accept) immediately publish files
+    Import {
+        /// Set artifacts live without review (pre-trusted content)
+        #[arg(long)]
+        accept: bool,
+        /// Target space id (defaults to the sole space if only one exists)
+        #[arg(long)]
+        space: Option<String>,
+        /// Files to import
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Show vault diagnostics
     Diag {
         /// Print the provenance chain for one artifact
         #[arg(long)]
         artifact: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InboxCommand {
+    /// Copy files into the inbox staging area
+    Add {
+        /// Files to stage
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// List staged files
+    Status,
+    /// Ingest staged files (intake + extraction + chunking)
+    Process {
+        /// Target space id (defaults to the sole space if only one exists)
+        #[arg(long)]
+        space: Option<String>,
     },
 }
 
@@ -79,6 +118,122 @@ fn open_vault(path: &std::path::Path) -> anyhow::Result<Vault> {
     Vault::open(path, &pass).with_context(|| format!("opening vault at {}", path.display()))
 }
 
+/// Resolve the target space: explicit flag, else the sole existing space.
+fn resolve_space(vault: &Vault, flag: Option<String>) -> anyhow::Result<SpaceId> {
+    if let Some(id) = flag {
+        return Ok(SpaceId(id));
+    }
+    let spaces = space::list(vault)?;
+    match spaces.len() {
+        0 => bail!("no spaces exist — create one with `tessera space create <name>`"),
+        1 => Ok(spaces.into_iter().next().expect("one space").id),
+        n => bail!("{n} spaces exist — pass --space <id>"),
+    }
+}
+
+/// Run the ingestion pipeline on staged files: intake, then extraction and
+/// chunking for text types (best-effort; failures leave items pending).
+fn run_inbox_pipeline(
+    vault: &Vault,
+    space: &SpaceId,
+) -> anyhow::Result<Vec<tessera_core::ArtifactId>> {
+    let report = tessera_core::inbox::process(vault, space)?;
+    let mut ingested = Vec::new();
+    for (path, artifact_id) in &report.ingested {
+        match tessera_core::extract::extract_text(vault, artifact_id) {
+            Ok(Some(derived)) => {
+                if let Err(e) = tessera_core::chunk::chunk_derived_text(
+                    vault,
+                    &derived,
+                    &tessera_core::chunk::ChunkParams::default(),
+                ) {
+                    eprintln!("warning: chunking failed for {}: {e}", path.display());
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: extraction failed for {}: {e}", path.display()),
+        }
+        println!("Ingested {}  {}", artifact_id.0, path.display());
+        ingested.push(artifact_id.clone());
+    }
+    for path in &report.duplicates {
+        println!("Duplicate (already in vault): {}", path.display());
+    }
+    for (path, err) in &report.failures {
+        eprintln!("Failed: {} — {err}", path.display());
+    }
+    Ok(ingested)
+}
+
+/// Interactive review loop over pending artifacts. SSH-safe: plain stdin.
+fn review_interactive(vault: &Vault) -> anyhow::Result<()> {
+    use tessera_core::artifact::{self, ArtifactState, Sensitivity};
+
+    let pending = artifact::list_by_state(vault, ArtifactState::Pending)?;
+    if pending.is_empty() {
+        println!("No pending artifacts.");
+        return Ok(());
+    }
+
+    let stdin = std::io::stdin();
+    for art in pending {
+        println!(
+            "\n{}  {}  [{}]  space={}  sensitivity={}",
+            art.id.0,
+            art.filename,
+            art.media_type,
+            art.space_id.0,
+            art.sensitivity.as_str()
+        );
+        print!("[a]ccept  [t]ags+accept  [s]ensitivity+accept  [x]archive  [enter]skip  [q]uit > ");
+        std::io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            break; // EOF: stop reviewing
+        }
+        match line.trim() {
+            "a" => {
+                artifact::set_state(vault, &art.id, ArtifactState::Live)?;
+                println!("{} → live", art.id.0);
+            }
+            "t" => {
+                print!("tags (comma-separated) > ");
+                std::io::stdout().flush()?;
+                let mut tags = String::new();
+                stdin.read_line(&mut tags)?;
+                for tag in tags.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    artifact::tag(vault, &art.id, tag)?;
+                }
+                artifact::set_state(vault, &art.id, ArtifactState::Live)?;
+                println!("{} → live (tagged)", art.id.0);
+            }
+            "s" => {
+                print!("sensitivity (public/internal/confidential/restricted) > ");
+                std::io::stdout().flush()?;
+                let mut level = String::new();
+                stdin.read_line(&mut level)?;
+                let sensitivity = match level.trim() {
+                    "public" => Sensitivity::Public,
+                    "confidential" => Sensitivity::Confidential,
+                    "restricted" => Sensitivity::Restricted,
+                    _ => Sensitivity::Internal,
+                };
+                artifact::set_sensitivity(vault, &art.id, sensitivity)?;
+                artifact::set_state(vault, &art.id, ArtifactState::Live)?;
+                println!("{} → live ({})", art.id.0, sensitivity.as_str());
+            }
+            "x" => {
+                artifact::set_state(vault, &art.id, ArtifactState::Archived)?;
+                println!("{} → archived", art.id.0);
+            }
+            "q" => break,
+            _ => println!("skipped"),
+        }
+    }
+    Ok(())
+}
+
 pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
     match command {
         Command::Init => {
@@ -122,6 +277,74 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     Ok(())
                 }
             }
+        }
+        Command::Inbox { action } => {
+            let vault = open_vault(&vault_path)?;
+            match action {
+                InboxCommand::Add { paths } => {
+                    let staged = tessera_core::inbox::add(&vault, &paths)?;
+                    for path in staged {
+                        println!("Staged {}", path.display());
+                    }
+                    Ok(())
+                }
+                InboxCommand::Status => {
+                    let staged = tessera_core::inbox::status(&vault)?;
+                    if staged.is_empty() {
+                        println!("Inbox is empty.");
+                    } else {
+                        for path in staged {
+                            println!("{}", path.display());
+                        }
+                    }
+                    Ok(())
+                }
+                InboxCommand::Process { space } => {
+                    let space = resolve_space(&vault, space)?;
+                    run_inbox_pipeline(&vault, &space)?;
+                    Ok(())
+                }
+            }
+        }
+        Command::Review { accept_all } => {
+            let vault = open_vault(&vault_path)?;
+            if accept_all {
+                use tessera_core::artifact::{self, ArtifactState};
+                let pending = artifact::list_by_state(&vault, ArtifactState::Pending)?;
+                if pending.is_empty() {
+                    println!("No pending artifacts.");
+                    return Ok(());
+                }
+                let count = pending.len();
+                for art in pending {
+                    artifact::set_state(&vault, &art.id, ArtifactState::Live)?;
+                }
+                println!("{count} artifact(s) → live");
+                Ok(())
+            } else {
+                review_interactive(&vault)
+            }
+        }
+        Command::Import {
+            accept,
+            space,
+            paths,
+        } => {
+            let vault = open_vault(&vault_path)?;
+            let space = resolve_space(&vault, space)?;
+            tessera_core::inbox::add(&vault, &paths)?;
+            let ingested = run_inbox_pipeline(&vault, &space)?;
+            if accept {
+                for id in &ingested {
+                    tessera_core::artifact::set_state(
+                        &vault,
+                        id,
+                        tessera_core::artifact::ArtifactState::Live,
+                    )?;
+                    println!("{} → live", id.0);
+                }
+            }
+            Ok(())
         }
         Command::Diag { artifact } => {
             println!("tessera v{}", env!("CARGO_PKG_VERSION"));

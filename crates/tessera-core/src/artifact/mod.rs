@@ -224,6 +224,38 @@ pub fn set_state(
     }
 }
 
+/// Update an artifact's sensitivity classification.
+pub fn set_sensitivity(
+    vault: &Vault,
+    artifact: &ArtifactId,
+    sensitivity: Sensitivity,
+) -> Result<(), ArtifactError> {
+    let changed = vault.conn().execute(
+        "UPDATE artifacts SET sensitivity = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![
+            sensitivity.as_str(),
+            chrono::Utc::now().to_rfc3339(),
+            artifact.0
+        ],
+    )?;
+    if changed == 0 {
+        return Err(ArtifactError::NotFound(artifact.0.clone()));
+    }
+    Ok(())
+}
+
+/// List artifacts in a given state across all spaces, oldest first (review
+/// queue order).
+pub fn list_by_state(vault: &Vault, state: ArtifactState) -> Result<Vec<Artifact>, ArtifactError> {
+    let mut stmt = vault.conn().prepare(&format!(
+        "SELECT {ARTIFACT_COLS} FROM artifacts WHERE state = ?1 ORDER BY created_at, id"
+    ))?;
+    let artifacts = stmt
+        .query_map([state.as_str()], row_to_artifact)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(artifacts)
+}
+
 const ARTIFACT_COLS: &str =
     "id, space_id, filename, media_type, sensitivity, state, created_at, updated_at";
 
@@ -409,6 +441,53 @@ mod tests {
             get(&vault, &id).expect("get").state,
             ArtifactState::Archived
         );
+    }
+
+    #[test]
+    fn sensitivity_can_be_adjusted() {
+        let (_dir, vault, space) = test_vault_with_space();
+        let id = register(
+            &vault,
+            &space,
+            "f.txt",
+            "text/plain",
+            Sensitivity::default(),
+        )
+        .expect("register");
+
+        set_sensitivity(&vault, &id, Sensitivity::Restricted).expect("update");
+        assert_eq!(
+            get(&vault, &id).expect("get").sensitivity,
+            Sensitivity::Restricted
+        );
+    }
+
+    #[test]
+    fn list_by_state_is_review_queue_order() {
+        let (_dir, vault, space) = test_vault_with_space();
+        let a = register(
+            &vault,
+            &space,
+            "a.txt",
+            "text/plain",
+            Sensitivity::default(),
+        )
+        .expect("a");
+        let b = register(
+            &vault,
+            &space,
+            "b.txt",
+            "text/plain",
+            Sensitivity::default(),
+        )
+        .expect("b");
+        set_state(&vault, &b, ArtifactState::Live).expect("b live");
+
+        let pending = list_by_state(&vault, ArtifactState::Pending).expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, a);
+        let live = list_by_state(&vault, ArtifactState::Live).expect("live");
+        assert_eq!(live.len(), 1);
     }
 
     #[test]
