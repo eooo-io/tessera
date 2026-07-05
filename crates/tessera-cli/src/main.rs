@@ -9,6 +9,10 @@ use clap::Parser;
 #[command(about = "Personal context vault with policy-gated retrieval")]
 #[command(version)]
 struct Cli {
+    /// Vault bundle path (default: $TESSERA_VAULT or ./vault.tessera)
+    #[arg(long, global = true)]
+    vault: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     command: commands::Command,
 }
@@ -19,5 +23,6 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    commands::execute(cli.command)
+    let vault_path = commands::resolve_vault_path(cli.vault);
+    commands::execute(vault_path, cli.command)
 }
