@@ -87,13 +87,33 @@ migrations issue (#4).*
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated
-256-bit Data Encryption Key (DEK) under a key derived from a user secret
-(v1: passphrase via Argon2id with the parameters in `tessera.json` and a
-per-slot random 16-byte salt). Adding/removing an unlock method touches only
-this file — never the blobs.
+256-bit Data Encryption Key (DEK) with XChaCha20-Poly1305 under a slot key
+derived from a passphrase via Argon2id. KDF parameters are stored **per
+slot** (the manifest's `crypto` object provides the defaults used when
+creating new slots), so e.g. a recovery key may use different costs.
+Adding/removing an unlock method touches only this file — never the blobs.
+Removing the final slot is forbidden. Writes are atomic (temp file +
+rename).
 
-*Status: binary layout not yet implemented; this section is completed by the
-key-management issue (#2).*
+Binary layout (all integers little-endian):
+
+```
+offset  size  field
+0       4     magic: ASCII "TSK1"
+4       1     slot_count: u8
+5       100×n slots, each:
+        +0    4   kdf_m_cost_kib: u32
+        +4    4   kdf_t_cost: u32
+        +8    4   kdf_p_cost: u32
+        +12   16  salt (random, per slot)
+        +28   24  XChaCha20-Poly1305 nonce (random, per slot)
+        +52   48  wrapped DEK: 32-byte ciphertext + 16-byte Poly1305 tag
+```
+
+File length MUST equal `5 + 100 × slot_count`; readers MUST reject anything
+else. Unlock = try each slot in order (derive slot key, attempt AEAD open);
+authentication failure on every slot means a wrong passphrase. Implemented
+in `tessera-core/src/crypto/keys.rs`.
 
 ## 5. `blobs/`
 
