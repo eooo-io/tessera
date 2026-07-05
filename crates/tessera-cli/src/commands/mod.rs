@@ -49,6 +49,15 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         top_k: usize,
     },
+    /// Run golden-set retrieval evaluation (exits non-zero below gate)
+    Eval {
+        /// Path to the golden set JSON: [{"question": "...", "expected": ["file.md"]}]
+        #[arg(long)]
+        golden: std::path::PathBuf,
+        /// Recall@10 gate threshold
+        #[arg(long, default_value_t = 0.70)]
+        gate: f64,
+    },
     /// Manage local models
     Model {
         #[command(subcommand)]
@@ -406,6 +415,38 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     r.byte_range.1
                 );
             }
+            Ok(())
+        }
+        Command::Eval { golden, gate } => {
+            let vault = open_vault(&vault_path)?;
+            let embedder = load_embedder()?;
+            let items = tessera_core::eval::parse_golden(&std::fs::read_to_string(&golden)?)?;
+            let report = tessera_core::eval::run(
+                &vault,
+                &embedder,
+                &items,
+                &tessera_core::search::owner_constraints(),
+            )?;
+
+            println!("questions:  {}", report.questions);
+            println!("Recall@5:   {:.3}", report.recall_at_5);
+            println!("Recall@10:  {:.3}", report.recall_at_10);
+            println!("MRR:        {:.3}", report.mrr);
+            for q in &report.per_question {
+                println!(
+                    "  r@10={:.2} rr={:.2}  {}",
+                    q.recall_at_10, q.reciprocal_rank, q.question
+                );
+            }
+            println!("{}", serde_json::to_string(&report)?);
+
+            if report.recall_at_10 < gate {
+                bail!(
+                    "gate FAILED: Recall@10 {:.3} < {gate:.2}",
+                    report.recall_at_10
+                );
+            }
+            println!("gate PASSED (Recall@10 ≥ {gate:.2})");
             Ok(())
         }
         Command::Model { action } => {

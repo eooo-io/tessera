@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod db;
 pub mod disclosure;
 pub mod embed;
+pub mod eval;
 pub mod extract;
 pub mod inbox;
 pub mod index;
