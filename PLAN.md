@@ -1,6 +1,6 @@
 # Tessera — Development Roadmap
 
-See `Tessera-MVP-Plan-v3.md` for full technical specification.
+> **Note (2026-07-05):** execution now tracks GitHub milestones M1–M7 (see `GOAL.md` and the design doc in `docs/superpowers/specs/`). Checkboxes below are kept roughly in sync; milestone/issue state on GitHub is authoritative. Guardian (MCP) replaces the REST gateway; M6=Guardian, M7=Multimodal.
 
 ## Iteration 0: Scaffolding
 - [x] Repo cleanup — remove legacy files, submodules
@@ -8,17 +8,17 @@ See `Tessera-MVP-Plan-v3.md` for full technical specification.
 - [x] CI/CD pipeline (fmt, clippy, test)
 - [x] OpenAPI stub, JSON schemas
 - [x] README, CLAUDE.md, PLAN.md
-- [ ] Basic vault directory initializer (bridge to Iteration 1)
+- [x] Basic vault directory initializer (bridge to Iteration 1)
 
 ## Iteration 1: Vault Storage, Spaces, Artifacts
-- [ ] Vault initialization with encryption (Argon2id key derivation + XChaCha20-Poly1305)
+- [x] Vault initialization with encryption (Argon2id key derivation + XChaCha20-Poly1305)
 - [ ] macOS Keychain integration for DEK storage
-- [ ] SQLite schema v0 with WAL mode
-- [ ] Spaces CRUD (hierarchical containers)
+- [x] SQLite schema v0 with WAL mode
+- [x] Spaces CRUD (hierarchical containers)
 - [ ] Artifact ingest pipeline
-- [ ] Content-addressed encrypted blob store
-- [ ] Deduplication (same file → same blob)
-- [ ] Tags model and artifact tagging
+- [x] Content-addressed encrypted blob store
+- [x] Deduplication (same file → same blob)
+- [x] Tags model and artifact tagging
 
 **Exit criteria**: Import 1,000 files without corruption. Dedup verified. Listing < 100ms for 10k artifacts.
 

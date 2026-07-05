@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/tessera-core",
-    "crates/tessera-gateway",
+    "crates/tessera-guardian",
     "crates/tessera-cli",
 ]
 

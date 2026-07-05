@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod db;
 pub mod disclosure;
 pub mod embed;
+pub mod extract;
 pub mod index;
 pub mod lens;
 pub mod receipt;

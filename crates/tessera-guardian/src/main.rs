@@ -1,4 +1,4 @@
-//! tessera-gateway — Localhost API daemon for agent access.
+//! tessera-guardian — the vault's enforcement point: MCP server for agent access.
 
 mod agent;
 mod auth;
@@ -13,9 +13,9 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    tracing::info!("tessera-gateway starting");
+    tracing::info!("tessera-guardian starting");
 
     // TODO(Iteration 6): Build router, bind to 127.0.0.1, serve.
-    println!("tessera-gateway is not yet implemented. See PLAN.md Iteration 6.");
+    println!("tessera-guardian is not yet implemented. See milestone M6.");
     Ok(())
 }

@@ -1,5 +1,7 @@
 # TESSERA
 
+> **⚠️ Partially superseded (2026-07-05):** architecture, gateway API, and iteration sequencing are superseded by `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` (guardian/MCP model) and the GitHub milestones. This document remains authoritative for crypto parameters, lens policy semantics, sensitivity levels, and performance budgets.
+
 ## MVP Implementation Plan
 
 **Version 3.0 — Strategic Revision | April 2026**

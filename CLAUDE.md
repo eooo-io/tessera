@@ -7,11 +7,12 @@ Tessera — Rust monorepo for a Mac-first personal context vault with policy-gat
 ## Structure
 
 - `crates/tessera-core/` — library crate (all domain logic)
-- `crates/tessera-gateway/` — binary crate (localhost HTTP daemon)
+- `crates/tessera-guardian/` — binary crate (the guardian: MCP server daemon, the only agent-facing entry to a vault)
 - `crates/tessera-cli/` — binary crate (CLI, ships as `tessera`)
 - `mac/` — SwiftUI Mac app (placeholder)
 - `spec/` — OpenAPI spec, JSON schemas
-- `Tessera-MVP-Plan-v3.md` — Authoritative MVP plan (source of truth for domain design)
+- `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` — Authoritative design (architecture, sequencing)
+- `Tessera-MVP-Plan-v3.md` — Reference for crypto params, lens semantics, sensitivity levels, performance budgets (architecture/sequencing sections superseded)
 - `tests/` — Integration tests and fixtures
 
 ## Build & Test
@@ -40,4 +41,4 @@ cargo clippy -- -D warnings        # lint
 
 ## Spec Reference
 
-The authoritative spec for domain types, schemas, APIs, and iteration sequencing is `Tessera-MVP-Plan-v3.md`.
+The authoritative design is `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md`; work items live in GitHub milestones M1–M7 (see `GOAL.md`). `Tessera-MVP-Plan-v3.md` remains the reference for crypto parameters, lens semantics, sensitivity levels, and performance budgets.

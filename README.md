@@ -28,7 +28,7 @@ Tessera lets you curate what matters, then grant AI agents permission to access 
 | Crate | Type | Description |
 |-------|------|-------------|
 | `tessera-core` | Library | Vault storage, ingestion, chunking, embeddings, vector index, policy evaluation, disclosure rendering, receipts |
-| `tessera-gateway` | Binary | Localhost API daemon — agent registry, session tokens, purpose-bound access, query endpoint, SSE activity stream |
+| `tessera-guardian` | Binary | Localhost API daemon — agent registry, session tokens, purpose-bound access, query endpoint, SSE activity stream |
 | `tessera-cli` | Binary | Command-line interface for vault operations, evaluation harness, diagnostics |
 
 A **SwiftUI Mac app** (`mac/`) provides the desktop interface for spaces, lens building, agent grant dialogs, session monitoring, and receipt viewing.
@@ -57,8 +57,8 @@ cargo clippy -- -D warnings
 # Run the CLI
 cargo run -p tessera-cli -- --help
 
-# Run the gateway
-cargo run -p tessera-gateway
+# Run the guardian
+cargo run -p tessera-guardian
 ```
 
 ## Project Structure
@@ -66,7 +66,7 @@ cargo run -p tessera-gateway
 ```
 ├── crates/
 │   ├── tessera-core/         # Domain logic library
-│   ├── tessera-gateway/      # Localhost HTTP daemon
+│   ├── tessera-guardian/      # Localhost HTTP daemon
 │   └── tessera-cli/          # CLI binary
 ├── mac/                      # SwiftUI Mac app
 ├── spec/                     # OpenAPI spec, JSON schemas
