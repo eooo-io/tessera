@@ -8,6 +8,7 @@ pub mod db;
 pub mod disclosure;
 pub mod embed;
 pub mod extract;
+pub mod inbox;
 pub mod index;
 pub mod lens;
 pub mod receipt;
