@@ -39,12 +39,25 @@ pub enum Command {
         /// Files to import
         paths: Vec<std::path::PathBuf>,
     },
+    /// Manage local models
+    Model {
+        #[command(subcommand)]
+        action: ModelCommand,
+    },
     /// Show vault diagnostics
     Diag {
         /// Print the provenance chain for one artifact
         #[arg(long)]
         artifact: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ModelCommand {
+    /// Download the embedding model files (via curl)
+    Fetch,
+    /// Show model installation status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -345,6 +358,52 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
             }
             Ok(())
+        }
+        Command::Model { action } => {
+            use tessera_core::embed::onnx;
+            let dir = onnx::default_model_dir();
+            match action {
+                ModelCommand::Status => {
+                    println!(
+                        "{} at {}: {}",
+                        onnx::MODEL_NAME,
+                        dir.display(),
+                        if onnx::model_present(&dir) {
+                            "installed"
+                        } else {
+                            "missing — run `tessera model fetch`"
+                        }
+                    );
+                    Ok(())
+                }
+                ModelCommand::Fetch => {
+                    std::fs::create_dir_all(&dir)?;
+                    let mut lock = String::new();
+                    for (name, url) in onnx::MODEL_FILES {
+                        let target = dir.join(name);
+                        if target.is_file() {
+                            println!("{name}: already present");
+                        } else {
+                            println!("Fetching {name} …");
+                            let status = std::process::Command::new("curl")
+                                .args(["-L", "--fail", "--progress-bar", "-o"])
+                                .arg(&target)
+                                .arg(url)
+                                .status()
+                                .context("running curl")?;
+                            if !status.success() {
+                                bail!("download failed for {name}");
+                            }
+                        }
+                        let hash = blake3::hash(&std::fs::read(&target)?);
+                        lock.push_str(&format!("{}  {}\n", hash.to_hex(), name));
+                    }
+                    // Trust-on-first-fetch: pin what we downloaded.
+                    std::fs::write(dir.join("models.lock"), lock)?;
+                    println!("Model ready at {}", dir.display());
+                    Ok(())
+                }
+            }
         }
         Command::Diag { artifact } => {
             println!("tessera v{}", env!("CARGO_PKG_VERSION"));

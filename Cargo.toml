@@ -44,6 +44,7 @@ clap = { version = "4", features = ["derive"] }
 # Embedding / ML
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 ndarray = "0.16"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # Text extraction
 pdf-extract = "0.7"
