@@ -7,7 +7,13 @@ pub use manifest::{
 };
 
 use std::path::{Path, PathBuf};
+
+use rusqlite::Connection;
 use thiserror::Error;
+
+use crate::blob::{BlobError, BlobStore};
+use crate::crypto::{CryptoError, Dek, KdfParams, KeyslotFile};
+use crate::db::DbError;
 
 #[derive(Error, Debug)]
 pub enum VaultError {
@@ -19,42 +25,273 @@ pub enum VaultError {
     BadPassphrase,
     #[error("vault is locked")]
     Locked,
+    #[error("manifest error: {0}")]
+    Manifest(#[from] ManifestError),
     #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(#[from] DbError),
+    #[error("blob store error: {0}")]
+    Blob(#[from] BlobError),
     #[error("crypto error: {0}")]
-    Crypto(String),
+    Crypto(CryptoError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// Handle to an open, unlocked vault.
+impl From<CryptoError> for VaultError {
+    fn from(e: CryptoError) -> Self {
+        match e {
+            CryptoError::BadPassphrase => VaultError::BadPassphrase,
+            other => VaultError::Crypto(other),
+        }
+    }
+}
+
+/// Handle to an open vault bundle. Content access requires an unlocked DEK;
+/// `lock()` discards it (zeroized on drop).
 pub struct Vault {
     path: PathBuf,
+    manifest: VaultManifest,
+    conn: Connection,
+    blobs: BlobStore,
+    dek: Option<Dek>,
 }
 
 impl Vault {
-    /// Create a new vault at the given path.
-    pub fn create(_path: &Path, _passphrase: &str) -> Result<Self, VaultError> {
-        todo!("Iteration 1")
+    /// Create a new vault at `path` with production KDF parameters.
+    pub fn create(path: &Path, passphrase: &str) -> Result<Self, VaultError> {
+        Self::create_with_params(path, passphrase, &KdfParams::DEFAULT)
     }
 
-    /// Open an existing vault.
-    pub fn open(_path: &Path, _passphrase: &str) -> Result<Self, VaultError> {
-        todo!("Iteration 1")
+    /// Create a new vault with explicit KDF parameters (tests, tuning).
+    pub fn create_with_params(
+        path: &Path,
+        passphrase: &str,
+        params: &KdfParams,
+    ) -> Result<Self, VaultError> {
+        if path.join("tessera.json").exists() {
+            return Err(VaultError::AlreadyExists(path.to_path_buf()));
+        }
+        std::fs::create_dir_all(path)?;
+        for dir in ["receipts", "inbox"] {
+            std::fs::create_dir_all(path.join(dir))?;
+        }
+
+        let (keyslots, dek) = KeyslotFile::create(passphrase, params)?;
+        keyslots.save(&path.join("keyslot.bin"))?;
+
+        let mut manifest = VaultManifest::new(chrono::Utc::now());
+        manifest.crypto.kdf_m_cost_kib = params.m_cost_kib;
+        manifest.crypto.kdf_t_cost = params.t_cost;
+        manifest.crypto.kdf_p_cost = params.p_cost;
+        manifest.save(&path.join("tessera.json"))?;
+
+        let conn = crate::db::open_database(&path.join("vault.db"))?;
+        let blobs = BlobStore::open(&path.join("blobs"))?;
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            manifest,
+            conn,
+            blobs,
+            dek: Some(dek),
+        })
     }
 
-    /// Lock the vault, zeroing the DEK from memory.
-    pub fn lock(&mut self) -> Result<(), VaultError> {
-        todo!("Iteration 1")
+    /// Open and unlock an existing vault.
+    pub fn open(path: &Path, passphrase: &str) -> Result<Self, VaultError> {
+        let manifest_path = path.join("tessera.json");
+        if !manifest_path.is_file() {
+            return Err(VaultError::NotFound(path.to_path_buf()));
+        }
+        let manifest = VaultManifest::load(&manifest_path)?;
+
+        let keyslots = KeyslotFile::load(&path.join("keyslot.bin"))?;
+        let dek = keyslots.unlock(passphrase)?;
+
+        let conn = crate::db::open_database(&path.join("vault.db"))?;
+        let blobs = BlobStore::open(&path.join("blobs"))?;
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            manifest,
+            conn,
+            blobs,
+            dek: Some(dek),
+        })
     }
 
-    /// Return the vault path.
+    /// Lock the vault, discarding the DEK (zeroized on drop).
+    pub fn lock(&mut self) {
+        self.dek = None;
+    }
+
+    /// Whether the vault is currently locked.
+    pub fn is_locked(&self) -> bool {
+        self.dek.is_none()
+    }
+
+    /// The unlocked DEK, or `VaultError::Locked`.
+    pub(crate) fn dek(&self) -> Result<&Dek, VaultError> {
+        self.dek.as_ref().ok_or(VaultError::Locked)
+    }
+
+    /// The vault bundle path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The parsed manifest.
+    pub fn manifest(&self) -> &VaultManifest {
+        &self.manifest
+    }
+
+    /// The vault database connection.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// The encrypted blob store.
+    pub(crate) fn blobs(&self) -> &BlobStore {
+        &self.blobs
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // Tests will be added in Iteration 1.
+    use super::*;
+
+    const TEST_PARAMS: KdfParams = KdfParams {
+        m_cost_kib: 1024,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    fn create_vault(dir: &Path) -> Vault {
+        Vault::create_with_params(&dir.join("V.tessera"), "passphrase", &TEST_PARAMS)
+            .expect("create")
+    }
+
+    #[test]
+    fn create_produces_full_bundle_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = create_vault(dir.path());
+        let root = vault.path();
+
+        for entry in ["tessera.json", "keyslot.bin", "vault.db"] {
+            assert!(root.join(entry).is_file(), "missing file: {entry}");
+        }
+        for entry in ["blobs", "receipts", "inbox"] {
+            assert!(root.join(entry).is_dir(), "missing dir: {entry}");
+        }
+        assert!(!vault.is_locked());
+    }
+
+    #[test]
+    fn create_then_reopen_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = {
+            let vault = create_vault(dir.path());
+            vault.path().to_path_buf()
+        };
+
+        let reopened = Vault::open(&path, "passphrase").expect("open");
+        assert!(!reopened.is_locked());
+        assert_eq!(reopened.manifest().format_version, FORMAT_VERSION);
+    }
+
+    #[test]
+    fn create_refuses_existing_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = create_vault(dir.path());
+        let path = vault.path().to_path_buf();
+        drop(vault);
+
+        assert!(matches!(
+            Vault::create_with_params(&path, "other", &TEST_PARAMS),
+            Err(VaultError::AlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn open_missing_vault_is_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            Vault::open(&dir.path().join("nope.tessera"), "x"),
+            Err(VaultError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn open_with_wrong_passphrase_is_bad_passphrase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = create_vault(dir.path()).path().to_path_buf();
+
+        assert!(matches!(
+            Vault::open(&path, "wrong"),
+            Err(VaultError::BadPassphrase)
+        ));
+    }
+
+    #[test]
+    fn copied_bundle_opens_at_new_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = create_vault(dir.path()).path().to_path_buf();
+
+        // Simulate rsync/drive copy to a different location.
+        let copy = dir.path().join("Copied.tessera");
+        copy_dir(&original, &copy);
+
+        let vault = Vault::open(&copy, "passphrase").expect("open copy");
+        assert_eq!(vault.path(), copy.as_path());
+    }
+
+    #[test]
+    fn open_vault_components_work_together() {
+        // The vault's DB is migrated and its blob store encrypts with the
+        // unlocked DEK — across a close/reopen boundary.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, hash) = {
+            let vault = create_vault(dir.path());
+            let hash = vault
+                .blobs()
+                .put(vault.dek().expect("unlocked"), b"integration")
+                .expect("put");
+            (vault.path().to_path_buf(), hash)
+        };
+
+        let vault = Vault::open(&path, "passphrase").expect("reopen");
+        let version = crate::db::migrations::schema_version(vault.conn()).expect("schema version");
+        assert!(version >= 1, "database not migrated");
+        assert_eq!(
+            vault
+                .blobs()
+                .get(vault.dek().expect("unlocked"), &hash)
+                .expect("get"),
+            b"integration"
+        );
+    }
+
+    #[test]
+    fn lock_discards_dek() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut vault = create_vault(dir.path());
+
+        assert!(vault.dek().is_ok());
+        vault.lock();
+        assert!(vault.is_locked());
+        assert!(matches!(vault.dek(), Err(VaultError::Locked)));
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("mkdir");
+        for entry in std::fs::read_dir(from).expect("read_dir") {
+            let entry = entry.expect("entry");
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy");
+            }
+        }
+    }
 }
