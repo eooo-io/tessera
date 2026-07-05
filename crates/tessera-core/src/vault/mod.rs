@@ -1,5 +1,11 @@
 //! Vault initialization, open, lock/unlock.
 
+pub mod manifest;
+
+pub use manifest::{
+    CryptoParams, EmbeddingModelEntry, ManifestError, VaultManifest, FORMAT_VERSION,
+};
+
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
