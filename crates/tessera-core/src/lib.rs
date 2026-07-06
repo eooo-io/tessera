@@ -16,6 +16,7 @@ pub mod provenance;
 pub mod receipt;
 pub mod search;
 pub mod space;
+pub mod summary;
 pub mod vault;
 
 // Cross-cutting policy-enforcement paranoia suite (#20): proves no lens can

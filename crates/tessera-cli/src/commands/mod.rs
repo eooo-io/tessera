@@ -52,6 +52,14 @@ pub enum Command {
         #[arg(long)]
         lens: Option<String>,
     },
+    /// Generate or regenerate an artifact's summary
+    Summarize {
+        /// Artifact id
+        artifact: String,
+        /// Regenerate even if a summary already exists
+        #[arg(long)]
+        redo: bool,
+    },
     /// Manage lenses (access policies)
     Lens {
         #[command(subcommand)]
@@ -220,6 +228,10 @@ fn run_inbox_pipeline(
                     &tessera_core::chunk::ChunkParams::default(),
                 ) {
                     eprintln!("warning: chunking failed for {}: {e}", path.display());
+                }
+                // Summary powers the `summary` disclosure mode; best-effort.
+                if let Err(e) = tessera_core::summary::generate(vault, artifact_id, false) {
+                    eprintln!("warning: summary failed for {}: {e}", path.display());
                 }
             }
             Ok(None) => {}
@@ -569,6 +581,18 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     r.byte_range.1
                 );
             }
+            Ok(())
+        }
+        Command::Summarize { artifact, redo } => {
+            let vault = open_vault(&vault_path)?;
+            let id = tessera_core::ArtifactId(artifact);
+            let summary = tessera_core::summary::generate(&vault, &id, redo)?;
+            let text = tessera_core::summary::get_summary_text(&vault, &id)?.unwrap_or_default();
+            println!(
+                "{}  ({}@{}, {})",
+                summary.blob_hash, summary.summarizer, summary.summarizer_version, summary.locality
+            );
+            println!("{text}");
             Ok(())
         }
         Command::Lens { action } => {
