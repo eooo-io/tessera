@@ -52,5 +52,11 @@ fn main() -> Result<()> {
     // clear message on stderr and never starts serving.
     let session = GuardianSession::bind(&vault, &cli.pairing)?;
 
-    mcp::serve_stdio(&session)
+    // The embedding model is loaded lazily on the first vault_query.
+    mcp::serve_stdio(&vault, &session, || {
+        let dir = tessera_core::embed::onnx::default_model_dir();
+        let embedder = tessera_core::embed::OnnxEmbedder::load(&dir)
+            .context("loading embedding model (run `tessera model fetch`)")?;
+        Ok(Box::new(embedder) as Box<dyn tessera_core::embed::EmbeddingProvider>)
+    })
 }

@@ -15,7 +15,7 @@
 
 use thiserror::Error;
 
-use crate::artifact::ArtifactId;
+use crate::artifact::{self, ArtifactError, ArtifactId, ArtifactState};
 use crate::blob::{BlobError, BlobHash};
 use crate::lens::{DisclosureMode, LensPolicy};
 use crate::search::SearchResult;
@@ -28,8 +28,16 @@ pub enum DisclosureError {
     NoSummary(String),
     #[error("chunk not found or byte range invalid: {0}")]
     BadChunk(String),
+    #[error("artifact not found: {0}")]
+    NotFound(String),
+    #[error("the active lens does not permit artifact {0}")]
+    NotPermitted(String),
+    #[error("artifact has no extracted text: {0}")]
+    NoText(String),
     #[error("summary error: {0}")]
     Summary(#[from] SummaryError),
+    #[error("artifact error: {0}")]
+    Artifact(#[from] ArtifactError),
     #[error("vault error: {0}")]
     Vault(#[from] VaultError),
     #[error("blob error: {0}")]
@@ -129,6 +137,138 @@ pub fn render(
     }
 }
 
+/// Whether the lens permits an agent to see a specific artifact — the
+/// single-artifact analog of the retrieval filter, applied to `vault_get_item`
+/// so a known id cannot bypass the lens. Mirrors the SQL constraints exactly:
+/// live-only, space include/exclude, media types, sensitivity ceiling, and tag
+/// include/exclude.
+pub fn permits(
+    vault: &Vault,
+    lens: &LensPolicy,
+    artifact_id: &ArtifactId,
+) -> Result<bool, DisclosureError> {
+    let a = match artifact::get(vault, artifact_id) {
+        Ok(a) => a,
+        Err(ArtifactError::NotFound(_)) => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if a.state != ArtifactState::Live {
+        return Ok(false);
+    }
+    let c = lens.to_constraints();
+    if !c.space_ids.is_empty() && !c.space_ids.contains(&a.space_id) {
+        return Ok(false);
+    }
+    if c.space_exclude_ids.contains(&a.space_id) {
+        return Ok(false);
+    }
+    if !c.media_types.is_empty() && !c.media_types.contains(&a.media_type) {
+        return Ok(false);
+    }
+    if a.sensitivity.rank() > c.sensitivity_ceiling.rank() {
+        return Ok(false);
+    }
+    if !c.tag_include.is_empty() || !c.tag_exclude.is_empty() {
+        let tags = artifact::tags_of(vault, artifact_id)?;
+        if !c.tag_include.is_empty() && !c.tag_include.iter().any(|t| tags.contains(t)) {
+            return Ok(false);
+        }
+        if c.tag_exclude.iter().any(|t| tags.contains(t)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Render a whole artifact at the lens's disclosure mode (`vault_get_item`).
+/// Refuses with `NotPermitted` if the lens does not admit the artifact — the
+/// enforcement point that stops id-guessing from bypassing the lens.
+pub fn render_item(
+    vault: &Vault,
+    lens: &LensPolicy,
+    artifact_id: &ArtifactId,
+    allow_full: bool,
+) -> Result<RenderedContext, DisclosureError> {
+    if !permits(vault, lens, artifact_id)? {
+        return Err(DisclosureError::NotPermitted(artifact_id.0.clone()));
+    }
+    let art = artifact::get(vault, artifact_id)?;
+    let title = lens.allow_metadata.then_some(art.filename);
+
+    let mode = match lens.disclosure_mode {
+        DisclosureMode::Full if !allow_full => DisclosureMode::Excerpt,
+        other => other,
+    };
+
+    match mode {
+        DisclosureMode::Summary => {
+            let body = summary::get_summary_text(vault, artifact_id)?
+                .ok_or_else(|| DisclosureError::NoSummary(artifact_id.0.clone()))?;
+            Ok(RenderedContext {
+                artifact_id: artifact_id.clone(),
+                title,
+                mode,
+                body,
+                bytes_disclosed: 0,
+                disclosed_range: None,
+                full_disclosure: false,
+            })
+        }
+        DisclosureMode::Excerpt => {
+            let derived = read_artifact_derived(vault, artifact_id)?;
+            let max = lens.max_quote_chars.unwrap_or(u32::MAX) as usize;
+            let excerpt: String = derived.chars().take(max).collect();
+            let bytes = excerpt.len() as u64;
+            Ok(RenderedContext {
+                artifact_id: artifact_id.clone(),
+                title,
+                mode,
+                body: excerpt,
+                bytes_disclosed: bytes,
+                disclosed_range: Some((0, bytes)),
+                full_disclosure: false,
+            })
+        }
+        DisclosureMode::Full => {
+            let derived = read_artifact_derived(vault, artifact_id)?;
+            let bytes = derived.len() as u64;
+            Ok(RenderedContext {
+                artifact_id: artifact_id.clone(),
+                title,
+                mode,
+                body: derived,
+                bytes_disclosed: bytes,
+                disclosed_range: Some((0, bytes)),
+                full_disclosure: true,
+            })
+        }
+    }
+}
+
+/// Decrypt the latest derived text of an artifact (its most recent version's
+/// most recent derivation).
+fn read_artifact_derived(
+    vault: &Vault,
+    artifact_id: &ArtifactId,
+) -> Result<String, DisclosureError> {
+    let blob_hash: String = vault
+        .conn()
+        .query_row(
+            "SELECT dt.blob_hash FROM derived_text dt
+             JOIN artifact_versions av ON av.id = dt.artifact_version_id
+             WHERE av.artifact_id = ?1
+             ORDER BY av.version DESC, dt.created_at DESC LIMIT 1",
+            [artifact_id.0.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DisclosureError::NoText(artifact_id.0.clone()),
+            other => DisclosureError::Database(other),
+        })?;
+    let bytes = vault.blobs().get(vault.dek()?, &BlobHash(blob_hash))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Decrypt the derived text that a chunk points into.
 fn read_chunk_derived(vault: &Vault, chunk_id: &str) -> Result<String, DisclosureError> {
     let blob_hash: String = vault
@@ -151,6 +291,7 @@ fn read_chunk_derived(vault: &Vault, chunk_id: &str) -> Result<String, Disclosur
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{self, ArtifactState, Sensitivity};
     use crate::crypto::KdfParams;
     use crate::lens::LensPolicy;
     use crate::space::{self, SpaceId};
@@ -199,6 +340,7 @@ mod tests {
         let chunks = chunk::chunk_derived_text(&vault, &derived, &chunk::ChunkParams::default())
             .expect("chunk");
         summary::generate(&vault, &artifact, false).expect("summary");
+        artifact::set_state(&vault, &artifact, ArtifactState::Live).expect("live");
 
         let first = &chunks[0];
         let result = SearchResult {
@@ -217,6 +359,79 @@ mod tests {
         l.disclosure_mode = mode;
         l.max_quote_chars = max_quote_chars;
         l
+    }
+
+    /// A lens with no space restriction (empty space_ids) and the highest
+    /// ceiling — permits any live artifact, for `render_item` tests.
+    fn permissive_lens(mode: DisclosureMode) -> LensPolicy {
+        let mut l = LensPolicy::new("t", vec![]);
+        l.disclosure_mode = mode;
+        l.sensitivity_ceiling = Sensitivity::Restricted;
+        l
+    }
+
+    #[test]
+    fn permits_and_render_item_summary() {
+        let (_dir, vault, result, source) = fixture("Fire safety for corridor walls and doors.");
+        let art = &result.artifact_id;
+        let lens = permissive_lens(DisclosureMode::Summary);
+        assert!(permits(&vault, &lens, art).expect("permits"));
+        let rc = render_item(&vault, &lens, art, false).expect("render_item");
+        assert_eq!(rc.mode, DisclosureMode::Summary);
+        assert_eq!(rc.bytes_disclosed, 0);
+        assert_eq!(rc.body, summary::summarize_text(&source));
+    }
+
+    #[test]
+    fn render_item_excerpt_truncates_whole_artifact() {
+        let (_dir, vault, result, source) = fixture("The quick brown fox jumps over the lazy dog.");
+        let art = &result.artifact_id;
+        let mut lens = permissive_lens(DisclosureMode::Excerpt);
+        lens.max_quote_chars = Some(9);
+        let rc = render_item(&vault, &lens, art, false).expect("render_item");
+        assert_eq!(rc.body.chars().count(), 9);
+        assert!(
+            source.starts_with(&rc.body),
+            "excerpt is a prefix of the artifact"
+        );
+        assert_eq!(rc.bytes_disclosed, rc.body.len() as u64);
+        assert_eq!(rc.disclosed_range, Some((0, rc.bytes_disclosed)));
+    }
+
+    #[test]
+    fn render_item_refuses_out_of_scope_artifact() {
+        let (_dir, vault, result, _s) = fixture("body text");
+        let art = &result.artifact_id;
+        // Scope the lens to a different space than the artifact lives in.
+        let mut lens = permissive_lens(DisclosureMode::Summary);
+        lens.space_ids = vec![SpaceId("space_OTHER".into())];
+        assert!(!permits(&vault, &lens, art).expect("permits"));
+        assert!(matches!(
+            render_item(&vault, &lens, art, false),
+            Err(DisclosureError::NotPermitted(_))
+        ));
+    }
+
+    #[test]
+    fn render_item_refuses_over_ceiling() {
+        let (_dir, vault, result, _s) = fixture("secret body");
+        let art = &result.artifact_id;
+        artifact::set_sensitivity(&vault, art, Sensitivity::Restricted).expect("sens");
+        let mut lens = permissive_lens(DisclosureMode::Summary);
+        lens.sensitivity_ceiling = Sensitivity::Internal;
+        assert!(!permits(&vault, &lens, art).expect("permits"));
+    }
+
+    #[test]
+    fn permits_refuses_quarantined_artifact() {
+        let (_dir, vault, result, _s) = fixture("pending body");
+        let art = &result.artifact_id;
+        artifact::set_state(&vault, art, ArtifactState::Archived).expect("archive");
+        let lens = permissive_lens(DisclosureMode::Summary);
+        assert!(
+            !permits(&vault, &lens, art).expect("permits"),
+            "non-live is never permitted"
+        );
     }
 
     #[test]

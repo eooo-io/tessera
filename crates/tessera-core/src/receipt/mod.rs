@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::artifact::ArtifactId;
 use crate::disclosure::{self, DisclosureError, RenderedContext};
 use crate::embed::EmbeddingProvider;
 use crate::lens::LensPolicy;
@@ -209,6 +210,25 @@ impl<'v> Session<'v> {
             artifacts_accessed: accesses,
         });
         Ok(rendered)
+    }
+
+    /// Fetch a single artifact at the lens's disclosure mode, recording the
+    /// access. Refuses (via the disclosure layer) any artifact the lens does
+    /// not admit, so a known id cannot bypass the policy.
+    pub fn get_item(&mut self, artifact_id: &ArtifactId) -> Result<RenderedContext, ReceiptError> {
+        let rc = disclosure::render_item(self.vault, &self.lens, artifact_id, self.allow_full)?;
+        self.receipt.queries.push(QueryRecord {
+            query_id: format!("qry_{}", ulid::Ulid::new()),
+            timestamp: chrono::Utc::now(),
+            query_text: format!("get_item {}", artifact_id.0),
+            artifacts_accessed: vec![ArtifactAccess {
+                artifact_id: rc.artifact_id.0.clone(),
+                artifact_title: rc.title.clone().unwrap_or_default(),
+                disclosure_mode: rc.mode.as_str().to_owned(),
+                bytes_disclosed: rc.bytes_disclosed,
+            }],
+        });
+        Ok(rc)
     }
 
     /// Number of queries recorded so far.
