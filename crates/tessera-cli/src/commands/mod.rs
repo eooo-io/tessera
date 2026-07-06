@@ -51,6 +51,9 @@ pub enum Command {
         /// Retrieve under a lens (policy-filtered) instead of the owner view
         #[arg(long)]
         lens: Option<String>,
+        /// Declared purpose recorded in the receipt (with --lens)
+        #[arg(long, default_value = "cli query")]
+        purpose: String,
     },
     /// Generate or regenerate an artifact's summary
     Summarize {
@@ -64,6 +67,11 @@ pub enum Command {
     Lens {
         #[command(subcommand)]
         action: LensCommand,
+    },
+    /// Inspect and verify access receipts
+    Receipts {
+        #[command(subcommand)]
+        action: ReceiptsCommand,
     },
     /// Run golden-set retrieval evaluation (exits non-zero below gate)
     Eval {
@@ -136,6 +144,30 @@ pub enum LensCommand {
         /// Lens id
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ReceiptsCommand {
+    /// List all receipts, oldest first
+    List,
+    /// Print one receipt as JSON
+    Show {
+        /// Receipt id
+        id: String,
+    },
+    /// Export a receipt as JSON (default) or standalone HTML
+    Export {
+        /// Receipt id
+        id: String,
+        /// Emit HTML instead of JSON
+        #[arg(long)]
+        html: bool,
+        /// Write to this file instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Verify the hash chain over all receipts
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -543,12 +575,17 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
             println!("Embedded {count} chunk(s).");
             Ok(())
         }
-        Command::Query { text, top_k, lens } => {
+        Command::Query {
+            text,
+            top_k,
+            lens,
+            purpose,
+        } => {
             let vault = open_vault(&vault_path)?;
             let embedder = load_embedder()?;
             match lens {
-                // Under a lens, every hit passes through the disclosure
-                // renderer — the agent sees only what the lens permits.
+                // Under a lens, the query runs inside a recording Session:
+                // retrieval + disclosure + receipt journaling are one step.
                 Some(lens_id) => {
                     let policy = tessera_core::lens::get(&vault, &tessera_core::LensId(lens_id))?;
                     eprintln!(
@@ -557,24 +594,20 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         policy.name,
                         policy.disclosure_mode.as_str()
                     );
-                    let results = tessera_core::search::search_with_lens(
-                        &vault, &embedder, &policy, &text, top_k,
+                    let agent = tessera_core::receipt::AgentRef {
+                        agent_id: "cli".into(),
+                        name: "cli-user".into(),
+                    };
+                    let mut session = tessera_core::receipt::Session::open(
+                        &vault, agent, &policy, purpose, false,
                     )?;
-                    if results.is_empty() {
+                    let rendered = session.query(&embedder, &text, top_k)?;
+                    if rendered.is_empty() {
                         println!("No results.");
                     }
-                    for (rank, r) in results.iter().enumerate() {
-                        // allow_full is false at the CLI: a full lens
-                        // fail-closes to an excerpt here.
-                        let rc = tessera_core::disclosure::render(&vault, r, &policy, false)?;
+                    for (rank, rc) in rendered.iter().enumerate() {
                         let title = rc.title.as_deref().unwrap_or("(metadata withheld)");
-                        println!(
-                            "{}. {}  (score {:.3})  [{}]",
-                            rank + 1,
-                            title,
-                            r.relevance_score,
-                            rc.mode.as_str()
-                        );
+                        println!("{}. {}  [{}]", rank + 1, title, rc.mode.as_str());
                         if rc.full_disclosure {
                             eprintln!("   ⚠ FULL disclosure — {} bytes", rc.bytes_disclosed);
                         }
@@ -583,6 +616,11 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                             println!("   (bytes {s}..{e})");
                         }
                     }
+                    let receipt = session.finalize()?;
+                    eprintln!(
+                        "(receipt {} — verify with `tessera receipts verify`)",
+                        receipt.receipt_id
+                    );
                 }
                 // Owner view: raw citations, everything live.
                 None => {
@@ -668,6 +706,57 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 LensCommand::Delete { id } => {
                     lens::delete(&vault, &LensId(id.clone()))?;
                     println!("Deleted lens {id}");
+                    Ok(())
+                }
+            }
+        }
+        Command::Receipts { action } => {
+            use tessera_core::receipt;
+            let vault = open_vault(&vault_path)?;
+            match action {
+                ReceiptsCommand::List => {
+                    let receipts = receipt::list(&vault)?;
+                    if receipts.is_empty() {
+                        println!("No receipts.");
+                    }
+                    for r in &receipts {
+                        println!(
+                            "#{}  {}  lens={}  purpose={:?}  queries={}  bytes={}",
+                            r.seq,
+                            r.receipt_id,
+                            r.lens.name,
+                            r.purpose,
+                            r.summary.total_queries,
+                            r.summary.total_bytes_disclosed
+                        );
+                    }
+                    Ok(())
+                }
+                ReceiptsCommand::Show { id } => {
+                    let r = receipt::load(&vault, &id)?;
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                    Ok(())
+                }
+                ReceiptsCommand::Export { id, html, out } => {
+                    let r = receipt::load(&vault, &id)?;
+                    let content = if html {
+                        receipt::export_html(&r)
+                    } else {
+                        serde_json::to_string_pretty(&r)?
+                    };
+                    match out {
+                        Some(path) => {
+                            std::fs::write(&path, content)
+                                .with_context(|| format!("writing {}", path.display()))?;
+                            println!("Wrote {}", path.display());
+                        }
+                        None => println!("{content}"),
+                    }
+                    Ok(())
+                }
+                ReceiptsCommand::Verify => {
+                    let n = receipt::verify(&vault)?;
+                    println!("OK — {n} receipt(s) verified, chain intact");
                     Ok(())
                 }
             }

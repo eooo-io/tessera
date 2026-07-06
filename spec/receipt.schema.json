@@ -4,10 +4,23 @@
   "title": "Receipt",
   "description": "Immutable record of what was accessed during a session.",
   "type": "object",
-  "required": ["receipt_id", "session_id", "agent", "lens", "purpose", "started_at", "queries", "summary"],
+  "required": ["receipt_id", "session_id", "agent", "lens", "purpose", "started_at", "queries", "summary", "seq"],
   "properties": {
     "receipt_id": { "type": "string" },
     "session_id": { "type": "string" },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Position in the vault's receipt hash-chain (0 = genesis)."
+    },
+    "prev_receipt_hash": {
+      "type": ["string", "null"],
+      "description": "BLAKE3 of the previous receipt's canonical content (null at seq 0)."
+    },
+    "self_hash": {
+      "type": ["string", "null"],
+      "description": "BLAKE3 of this receipt's canonical content (excluding self_hash); set at finalize."
+    },
     "agent": {
       "type": "object",
       "required": ["agent_id", "name"],
