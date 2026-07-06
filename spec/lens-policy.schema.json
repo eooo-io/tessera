@@ -33,6 +33,11 @@
       "items": { "type": "string" },
       "default": []
     },
+    "media_types": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
     "disclosure_mode": {
       "type": "string",
       "enum": ["summary", "excerpt", "full"]

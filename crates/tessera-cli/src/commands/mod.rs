@@ -49,6 +49,11 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         top_k: usize,
     },
+    /// Manage lenses (access policies)
+    Lens {
+        #[command(subcommand)]
+        action: LensCommand,
+    },
     /// Run golden-set retrieval evaluation (exits non-zero below gate)
     Eval {
         /// Path to the golden set JSON: [{"question": "...", "expected": ["file.md"]}]
@@ -93,6 +98,32 @@ pub enum InboxCommand {
         /// Target space id (defaults to the sole space if only one exists)
         #[arg(long)]
         space: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LensCommand {
+    /// List all lenses
+    List,
+    /// Print one lens as JSON
+    Show {
+        /// Lens id
+        id: String,
+    },
+    /// Create a lens interactively
+    Create,
+    /// Edit a lens (opens $EDITOR, or use --file for a prepared policy)
+    Edit {
+        /// Lens id
+        id: String,
+        /// Read the edited policy JSON from this file instead of $EDITOR
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Delete a lens
+    Delete {
+        /// Lens id
+        id: String,
     },
 }
 
@@ -201,6 +232,112 @@ fn run_inbox_pipeline(
         eprintln!("Failed: {} — {err}", path.display());
     }
     Ok(ingested)
+}
+
+/// Read one trimmed line from stdin after printing a prompt. SSH-safe.
+fn prompt_line(label: &str) -> anyhow::Result<String> {
+    print!("{label}");
+    std::io::stdout().flush()?;
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s)?;
+    Ok(s.trim().to_string())
+}
+
+/// Split a comma-separated answer into trimmed, non-empty values.
+fn parse_csv(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Build a lens policy through interactive prompts, then persist it. Schema
+/// validation runs inside `lens::create`; a rejection prints field-level
+/// errors and exits non-zero.
+fn lens_create_interactive(vault: &Vault) -> anyhow::Result<()> {
+    use tessera_core::artifact::Sensitivity;
+    use tessera_core::lens::{self, LensError};
+    use tessera_core::{ApprovalRule, DisclosureMode, LensPolicy};
+
+    let name = prompt_line("Name: ")?;
+    let spaces = parse_csv(&prompt_line("Space ids (comma-separated): ")?);
+    let mut p = LensPolicy::new(name, spaces.into_iter().map(SpaceId).collect());
+
+    p.disclosure_mode =
+        match prompt_line("Disclosure mode [summary/excerpt/full] (summary): ")?.as_str() {
+            "excerpt" => DisclosureMode::Excerpt,
+            "full" => DisclosureMode::Full,
+            _ => DisclosureMode::Summary,
+        };
+    if p.disclosure_mode == DisclosureMode::Excerpt {
+        let raw = prompt_line("Max quote chars (800): ")?;
+        p.max_quote_chars = Some(raw.parse().unwrap_or(800));
+    }
+
+    let ops = parse_csv(&prompt_line(
+        "Operations [answer,draft,extract,cite] (answer): ",
+    )?);
+    if !ops.is_empty() {
+        p.operations = ops;
+    }
+
+    p.sensitivity_ceiling = match prompt_line(
+        "Sensitivity ceiling [public/internal/confidential/restricted] (internal): ",
+    )?
+    .as_str()
+    {
+        "public" => Sensitivity::Public,
+        "confidential" => Sensitivity::Confidential,
+        "restricted" => Sensitivity::Restricted,
+        _ => Sensitivity::Internal,
+    };
+
+    p.approval_rule =
+        match prompt_line("Approval rule [never/always/on_sensitive] (on_sensitive): ")?.as_str() {
+            "never" => ApprovalRule::Never,
+            "always" => ApprovalRule::Always,
+            _ => ApprovalRule::OnSensitive,
+        };
+
+    let ttl = prompt_line("Default TTL minutes (60): ")?;
+    if let Ok(n) = ttl.parse::<u32>() {
+        if n >= 1 {
+            p.default_ttl_minutes = n;
+        }
+    }
+
+    p.media_types = parse_csv(&prompt_line(
+        "Media types (MIME, comma-separated, optional): ",
+    )?);
+    p.tag_include = parse_csv(&prompt_line("Include tags (optional): ")?);
+    p.tag_exclude = parse_csv(&prompt_line("Exclude tags (optional): ")?);
+
+    match lens::create(vault, &p) {
+        Ok(id) => {
+            println!("Created lens {}  {}", id.0, p.name);
+            Ok(())
+        }
+        Err(LensError::Invalid(msg)) => bail!("policy rejected:\n{msg}"),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Open `initial` in `$EDITOR` (fallback `vi`) and return the edited text.
+fn edit_in_editor(initial: &str, id: &str) -> anyhow::Result<String> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let path = std::env::temp_dir().join(format!("tessera-lens-{id}-{}.json", std::process::id()));
+    std::fs::write(&path, initial)?;
+    let status = std::process::Command::new(&editor)
+        .arg(&path)
+        .status()
+        .with_context(|| format!("launching editor '{editor}'"))?;
+    let contents = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    if !status.success() {
+        bail!("editor '{editor}' exited with failure; lens unchanged");
+    }
+    Ok(contents?)
 }
 
 /// Interactive review loop over pending artifacts. SSH-safe: plain stdin.
@@ -416,6 +553,55 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 );
             }
             Ok(())
+        }
+        Command::Lens { action } => {
+            use tessera_core::lens::{self, LensError};
+            use tessera_core::LensId;
+            let vault = open_vault(&vault_path)?;
+            match action {
+                LensCommand::List => {
+                    for l in lens::list(&vault)? {
+                        println!(
+                            "{}  {}  [{}]  spaces={}",
+                            l.id.0,
+                            l.name,
+                            l.disclosure_mode.as_str(),
+                            l.space_ids.len()
+                        );
+                    }
+                    Ok(())
+                }
+                LensCommand::Show { id } => {
+                    let p = lens::get(&vault, &LensId(id))?;
+                    println!("{}", lens::to_json(&p)?);
+                    Ok(())
+                }
+                LensCommand::Create => lens_create_interactive(&vault),
+                LensCommand::Edit { id, file } => {
+                    let lid = LensId(id.clone());
+                    let current = lens::get(&vault, &lid)?;
+                    let new_json = match file {
+                        Some(path) => std::fs::read_to_string(&path)
+                            .with_context(|| format!("reading {}", path.display()))?,
+                        None => edit_in_editor(&lens::to_json(&current)?, &id)?,
+                    };
+                    let mut edited = match lens::from_json(&new_json) {
+                        Ok(p) => p,
+                        Err(LensError::Invalid(msg)) => bail!("policy rejected:\n{msg}"),
+                        Err(e) => return Err(e.into()),
+                    };
+                    // The row is selected by id; an edit must not retarget it.
+                    edited.id = lid;
+                    lens::update(&vault, &edited)?;
+                    println!("Updated lens {id}");
+                    Ok(())
+                }
+                LensCommand::Delete { id } => {
+                    lens::delete(&vault, &LensId(id.clone()))?;
+                    println!("Deleted lens {id}");
+                    Ok(())
+                }
+            }
         }
         Command::Eval { golden, gate } => {
             let vault = open_vault(&vault_path)?;

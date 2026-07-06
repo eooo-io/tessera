@@ -17,6 +17,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("0004_state_transitions.sql"),
     ),
     ("0005_embeddings", include_str!("0005_embeddings.sql")),
+    ("0006_lenses", include_str!("0006_lenses.sql")),
 ];
 
 /// Number of migrations this build knows about.

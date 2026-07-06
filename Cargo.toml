@@ -17,6 +17,10 @@ repository = "https://github.com/eooo-io/tessera"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# JSON Schema validation (lens policy). default-features off avoids pulling
+# the HTTP/file reference resolvers (reqwest) — our schema has no remote $refs.
+jsonschema = { version = "0.46", default-features = false }
+
 # Database
 rusqlite = { version = "0.31", features = ["bundled", "blob", "load_extension"] }
 
