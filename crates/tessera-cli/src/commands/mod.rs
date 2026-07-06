@@ -68,6 +68,11 @@ pub enum Command {
         #[command(subcommand)]
         action: LensCommand,
     },
+    /// Authorize agent pairings for the guardian
+    Pair {
+        #[command(subcommand)]
+        action: PairCommand,
+    },
     /// Inspect and verify access receipts
     Receipts {
         #[command(subcommand)]
@@ -142,6 +147,32 @@ pub enum LensCommand {
     /// Delete a lens
     Delete {
         /// Lens id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PairCommand {
+    /// Approve a pairing: bind a lens + purpose for an agent to connect
+    Add {
+        /// Lens id the pairing grants access through
+        #[arg(long)]
+        lens: String,
+        /// Declared purpose for the pairing
+        #[arg(long)]
+        purpose: String,
+        /// Agent name (free text, recorded in receipts)
+        #[arg(long, default_value = "agent")]
+        agent: String,
+        /// Session TTL in minutes (defaults to the lens's default)
+        #[arg(long)]
+        ttl: Option<u32>,
+    },
+    /// List all pairings
+    List,
+    /// Revoke a pairing
+    Revoke {
+        /// Pairing id
         id: String,
     },
 }
@@ -706,6 +737,55 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 LensCommand::Delete { id } => {
                     lens::delete(&vault, &LensId(id.clone()))?;
                     println!("Deleted lens {id}");
+                    Ok(())
+                }
+            }
+        }
+        Command::Pair { action } => {
+            use tessera_core::pairing;
+            use tessera_core::LensId;
+            let vault = open_vault(&vault_path)?;
+            match action {
+                PairCommand::Add {
+                    lens,
+                    purpose,
+                    agent,
+                    ttl,
+                } => {
+                    let lens_id = LensId(lens);
+                    // Default the TTL to the lens's own default when unset.
+                    let ttl = match ttl {
+                        Some(t) => t,
+                        None => tessera_core::lens::get(&vault, &lens_id)?.default_ttl_minutes,
+                    };
+                    let p = pairing::approve(&vault, &lens_id, &purpose, &agent, ttl)?;
+                    println!("Approved pairing {}", p.id);
+                    println!(
+                        "  lens={}  purpose={:?}  agent={}  ttl={}min",
+                        p.lens_id, p.purpose, p.agent_name, p.ttl_minutes
+                    );
+                    println!(
+                        "Launch the guardian with: tessera-guardian --vault <path> --pairing {}",
+                        p.id
+                    );
+                    Ok(())
+                }
+                PairCommand::List => {
+                    for p in pairing::list(&vault)? {
+                        println!(
+                            "{}  lens={}  purpose={:?}  agent={}  {}",
+                            p.id,
+                            p.lens_id,
+                            p.purpose,
+                            p.agent_name,
+                            if p.is_active() { "active" } else { "revoked" }
+                        );
+                    }
+                    Ok(())
+                }
+                PairCommand::Revoke { id } => {
+                    pairing::revoke(&vault, &id)?;
+                    println!("Revoked pairing {id}");
                     Ok(())
                 }
             }

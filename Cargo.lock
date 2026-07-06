@@ -2753,6 +2753,7 @@ dependencies = [
  "axum 0.7.9",
  "axum-extra",
  "chrono",
+ "clap",
  "jsonwebtoken",
  "serde",
  "serde_json",

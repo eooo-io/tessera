@@ -12,6 +12,7 @@ pub mod extract;
 pub mod inbox;
 pub mod index;
 pub mod lens;
+pub mod pairing;
 pub mod provenance;
 pub mod receipt;
 pub mod search;
