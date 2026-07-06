@@ -18,6 +18,11 @@ pub mod search;
 pub mod space;
 pub mod vault;
 
+// Cross-cutting policy-enforcement paranoia suite (#20): proves no lens can
+// ever surface content it is not entitled to. Test-only; spans lens + index.
+#[cfg(test)]
+mod policy_enforcement;
+
 // Re-export primary types.
 pub use artifact::{Artifact, ArtifactId, Sensitivity};
 pub use lens::{ApprovalRule, DisclosureMode, LensId, LensPolicy};
