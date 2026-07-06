@@ -12,6 +12,7 @@
 mod tools;
 
 use std::io::{BufRead, Write};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -57,6 +58,8 @@ pub fn serve_stdio(
     let session_id = live.id;
 
     let mut embedder: Option<Box<dyn EmbeddingProvider>> = None;
+    // Timestamps of accepted disclosing calls, for the rolling-window limiter.
+    let mut query_times: Vec<Instant> = Vec::new();
 
     tracing::info!(
         session = %session_id,
@@ -142,6 +145,34 @@ pub fn serve_stdio(
                     .cloned()
                     .unwrap_or_else(|| json!({}));
 
+                // Per-session rate limit over a rolling 60s window (disclosing
+                // tools only). Exceeding it returns a retryable error, records a
+                // rate-limit event in the receipt, and does NOT dispatch.
+                if matches!(name.as_str(), "vault_query" | "vault_get_item") {
+                    let limit = session.lens.max_queries_per_min();
+                    let now = Instant::now();
+                    query_times.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+                    if query_times.len() as u32 >= limit {
+                        let retry_after = query_times
+                            .first()
+                            .map(|t| 60u64.saturating_sub(now.duration_since(*t).as_secs()))
+                            .unwrap_or(60);
+                        receipt.record_rate_limit(&name, &format!("{limit} queries/min exceeded"));
+                        write_message(
+                            &mut out,
+                            result(
+                                id,
+                                tool_error(&format!(
+                                    "rate limit exceeded ({limit} queries/min) — retryable; \
+                                     retry in ~{retry_after}s"
+                                )),
+                            ),
+                        )?;
+                        continue;
+                    }
+                    query_times.push(now);
+                }
+
                 // Lazily load the model the first time a query needs it.
                 if name == "vault_query" && embedder.is_none() {
                     match load_embedder() {
@@ -187,9 +218,9 @@ pub fn serve_stdio(
         }
     }
 
-    // On any exit — EOF, revocation, or expiry — finalize the receipt (if the
-    // agent accessed anything) and seal the session.
-    let receipt_id = if receipt.query_count() > 0 {
+    // On any exit — EOF, revocation, or expiry — finalize the receipt (if
+    // anything worth recording happened, incl. rate-limit events) and seal it.
+    let receipt_id = if receipt.has_activity() {
         let finalized = receipt
             .finalize()
             .map_err(|e| anyhow::anyhow!("finalizing receipt: {e}"))?;

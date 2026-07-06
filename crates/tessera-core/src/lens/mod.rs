@@ -84,6 +84,9 @@ impl ApprovalRule {
     }
 }
 
+/// The rate cap applied when a lens does not set `max_queries_per_min`.
+pub const DEFAULT_MAX_QUERIES_PER_MIN: u32 = 100;
+
 fn default_true() -> bool {
     true
 }
@@ -134,6 +137,10 @@ pub struct LensPolicy {
     pub approval_rule: ApprovalRule,
     #[serde(default = "default_ttl")]
     pub default_ttl_minutes: u32,
+    /// Per-session query rate cap. Absent means the system default
+    /// (`DEFAULT_MAX_QUERIES_PER_MIN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_queries_per_min: Option<u32>,
     #[serde(default = "now")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default = "now")]
@@ -165,9 +172,16 @@ impl LensPolicy {
             sensitivity_ceiling: Sensitivity::Internal,
             approval_rule: ApprovalRule::OnSensitive,
             default_ttl_minutes: 60,
+            max_queries_per_min: None,
             created_at: ts,
             updated_at: ts,
         }
+    }
+
+    /// The effective per-session query cap (falling back to the system default).
+    pub fn max_queries_per_min(&self) -> u32 {
+        self.max_queries_per_min
+            .unwrap_or(DEFAULT_MAX_QUERIES_PER_MIN)
     }
 
     /// Compile this policy into vector-index retrieval constraints (#19).
@@ -353,6 +367,7 @@ mod tests {
         p.disclosure_mode = DisclosureMode::Excerpt;
         p.max_quote_chars = Some(800);
         p.media_types = vec!["text/markdown".into()];
+        p.max_queries_per_min = Some(100);
         p
     }
 
@@ -503,6 +518,22 @@ mod tests {
             struct_fields, schema_fields,
             "LensPolicy fields and schema properties drifted"
         );
+    }
+
+    #[test]
+    fn max_queries_per_min_defaults_to_system_value() {
+        let p = LensPolicy::new("d", vec![SpaceId("space_A".into())]);
+        assert!(p.max_queries_per_min.is_none());
+        assert_eq!(p.max_queries_per_min(), DEFAULT_MAX_QUERIES_PER_MIN);
+        let mut p2 = p.clone();
+        p2.max_queries_per_min = Some(5);
+        assert_eq!(p2.max_queries_per_min(), 5);
+        // None serializes as absent (schema types it as integer).
+        assert!(serde_json::to_value(&p)
+            .unwrap()
+            .get("max_queries_per_min")
+            .is_none());
+        validate(&p).expect("default policy validates");
     }
 
     #[test]

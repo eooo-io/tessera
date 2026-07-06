@@ -73,6 +73,11 @@
       "minimum": 1,
       "default": 60
     },
+    "max_queries_per_min": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Per-session query rate cap; absent means the system default (100)."
+    },
     "created_at": {
       "type": "string",
       "format": "date-time"

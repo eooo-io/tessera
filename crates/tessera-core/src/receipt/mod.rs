@@ -67,6 +67,14 @@ pub struct QueryRecord {
     pub artifacts_accessed: Vec<ArtifactAccess>,
 }
 
+/// A recorded rate-limit rejection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitEvent {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub tool: String,
+    pub detail: String,
+}
+
 /// Aggregate statistics.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptSummary {
@@ -88,6 +96,10 @@ pub struct Receipt {
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
     pub queries: Vec<QueryRecord>,
     pub summary: ReceiptSummary,
+    /// Rate-limit rejections that occurred during the session (covered by the
+    /// content hash, so they cannot be quietly stripped).
+    #[serde(default)]
+    pub rate_limit_events: Vec<RateLimitEvent>,
     /// Position in the vault's receipt chain (0 = genesis).
     pub seq: u64,
     /// BLAKE3 of the previous receipt's canonical content (`None` at seq 0).
@@ -169,6 +181,7 @@ impl<'v> Session<'v> {
             ended_at: None,
             queries: Vec::new(),
             summary: ReceiptSummary::default(),
+            rate_limit_events: Vec::new(),
             seq,
             prev_receipt_hash,
             self_hash: None,
@@ -231,9 +244,25 @@ impl<'v> Session<'v> {
         Ok(rc)
     }
 
+    /// Record a rate-limit rejection into the receipt (the refused call itself
+    /// is not counted as a query).
+    pub fn record_rate_limit(&mut self, tool: &str, detail: &str) {
+        self.receipt.rate_limit_events.push(RateLimitEvent {
+            timestamp: chrono::Utc::now(),
+            tool: tool.to_owned(),
+            detail: detail.to_owned(),
+        });
+    }
+
     /// Number of queries recorded so far.
     pub fn query_count(&self) -> usize {
         self.receipt.queries.len()
+    }
+
+    /// Whether anything worth persisting happened (a query or a rate-limit
+    /// event). Used to avoid finalizing empty receipts.
+    pub fn has_activity(&self) -> bool {
+        !self.receipt.queries.is_empty() || !self.receipt.rate_limit_events.is_empty()
     }
 
     /// Finalize: fill summary + `ended_at`, compute `self_hash`, and write
@@ -395,6 +424,7 @@ pub fn export_html(r: &Receipt) -> String {
   <span class="stat"><strong>{uniq}</strong> unique artifacts</span>
   <span class="stat"><strong>{bytes}</strong> bytes disclosed</span>
   <span class="stat">modes: {modes}</span>
+  <span class="stat"><strong>{rate_limits}</strong> rate-limit events</span>
 </div>
 <table>
   <thead><tr><th>Time</th><th>Query</th><th>Artifacts disclosed</th></tr></thead>
@@ -419,6 +449,7 @@ pub fn export_html(r: &Receipt) -> String {
         uniq = r.summary.unique_artifacts_accessed,
         bytes = r.summary.total_bytes_disclosed,
         modes = esc(&r.summary.disclosure_modes_used.join(", ")),
+        rate_limits = r.rate_limit_events.len(),
         seq = r.seq,
         prev = esc(prev),
         self_hash = esc(self_hash),

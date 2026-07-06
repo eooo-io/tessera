@@ -152,8 +152,11 @@ fn session_refused_for_revoked_pairing() {
 }
 
 /// A vault with one live, summarized doc and a summary lens scoped to its
-/// space. Returns (tempdir, vault path, lens id, artifact id).
-fn vault_with_live_doc() -> (tempfile::TempDir, std::path::PathBuf, LensId, ArtifactId) {
+/// space (with an optional per-session rate cap). Returns
+/// (tempdir, vault path, lens id, artifact id).
+fn vault_with_live_doc(
+    max_qpm: Option<u32>,
+) -> (tempfile::TempDir, std::path::PathBuf, LensId, ArtifactId) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("V.tessera");
     let vault = Vault::create_with_params(&path, "pass", &TEST_PARAMS).expect("create");
@@ -174,6 +177,7 @@ fn vault_with_live_doc() -> (tempfile::TempDir, std::path::PathBuf, LensId, Arti
     let mut lens = LensPolicy::new("reader", vec![space]);
     lens.disclosure_mode = DisclosureMode::Summary;
     lens.sensitivity_ceiling = tessera_core::artifact::Sensitivity::Restricted;
+    lens.max_queries_per_min = max_qpm;
     let lens_id = lens::create(&vault, &lens).expect("lens");
     drop(vault);
     (dir, path, lens_id, art)
@@ -215,7 +219,7 @@ fn expired_session_refuses_tool_calls() {
 
 #[test]
 fn revoked_session_refuses_next_call_and_finalizes_receipt() {
-    let (_dir, path, lens_id, art) = vault_with_live_doc();
+    let (_dir, path, lens_id, art) = vault_with_live_doc(None);
     let vault = Vault::open(&path, "pass").expect("open");
     let p = pairing::approve(&vault, &lens_id, "reading", "agent", 60).expect("approve");
     drop(vault);
@@ -292,6 +296,65 @@ fn revoked_session_refuses_next_call_and_finalizes_receipt() {
             .total_queries,
         1
     );
+}
+
+#[test]
+fn exceeding_rate_limit_returns_retryable_error_and_records_event() {
+    // A 2-queries/min lens: the third disclosing call in the window is refused.
+    let (_dir, path, lens_id, art) = vault_with_live_doc(Some(2));
+    let vault = Vault::open(&path, "pass").expect("open");
+    let p = pairing::approve(&vault, &lens_id, "reading", "agent", 60).expect("approve");
+    drop(vault);
+
+    let get_item = |id: i32| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"vault_get_item","arguments":{{"artifact_id":"{art}"}}}}}}"#,
+            art = art.0
+        )
+    };
+    let script = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.to_string(),
+        get_item(2),
+        get_item(3),
+        get_item(4),
+    ]
+    .join("\n");
+
+    let mut child = guardian(&path, &p.id).spawn().expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(format!("{script}\n").as_bytes())
+        .expect("write");
+    let output = child.wait_with_output().expect("wait");
+    let lines: Vec<Value> = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    let by_id = |id: i64| lines.iter().find(|m| m["id"] == id).expect("response");
+
+    assert!(by_id(2)["result"]["isError"].is_null(), "1st call ok");
+    assert!(by_id(3)["result"]["isError"].is_null(), "2nd call ok");
+    assert_eq!(by_id(4)["result"]["isError"], true, "3rd call rate-limited");
+    let text = by_id(4)["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("rate limit") && text.contains("retry"),
+        "error is retryable: {text}"
+    );
+
+    // The receipt records the rate-limit event; only accepted calls counted.
+    let vault = Vault::open(&path, "pass").expect("open");
+    let receipts = receipt::list(&vault).expect("list");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].rate_limit_events.len(),
+        1,
+        "rate-limit event visible in receipt"
+    );
+    assert_eq!(receipts[0].summary.total_queries, 2, "only accepted calls");
+    assert_eq!(receipt::verify(&vault).expect("verify"), 1);
 }
 
 #[test]
