@@ -546,7 +546,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
         Command::Query { text, top_k, lens } => {
             let vault = open_vault(&vault_path)?;
             let embedder = load_embedder()?;
-            let results = match lens {
+            match lens {
+                // Under a lens, every hit passes through the disclosure
+                // renderer — the agent sees only what the lens permits.
                 Some(lens_id) => {
                     let policy = tessera_core::lens::get(&vault, &tessera_core::LensId(lens_id))?;
                     eprintln!(
@@ -555,31 +557,57 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         policy.name,
                         policy.disclosure_mode.as_str()
                     );
-                    tessera_core::search::search_with_lens(
+                    let results = tessera_core::search::search_with_lens(
                         &vault, &embedder, &policy, &text, top_k,
-                    )?
+                    )?;
+                    if results.is_empty() {
+                        println!("No results.");
+                    }
+                    for (rank, r) in results.iter().enumerate() {
+                        // allow_full is false at the CLI: a full lens
+                        // fail-closes to an excerpt here.
+                        let rc = tessera_core::disclosure::render(&vault, r, &policy, false)?;
+                        let title = rc.title.as_deref().unwrap_or("(metadata withheld)");
+                        println!(
+                            "{}. {}  (score {:.3})  [{}]",
+                            rank + 1,
+                            title,
+                            r.relevance_score,
+                            rc.mode.as_str()
+                        );
+                        if rc.full_disclosure {
+                            eprintln!("   ⚠ FULL disclosure — {} bytes", rc.bytes_disclosed);
+                        }
+                        println!("   {}", rc.body.replace('\n', "\n   "));
+                        if let Some((s, e)) = rc.disclosed_range {
+                            println!("   (bytes {s}..{e})");
+                        }
+                    }
                 }
-                None => tessera_core::search::query(
-                    &vault,
-                    &embedder,
-                    &text,
-                    &tessera_core::search::owner_constraints(),
-                    top_k,
-                )?,
-            };
-            if results.is_empty() {
-                println!("No results.");
-            }
-            for (rank, r) in results.iter().enumerate() {
-                println!(
-                    "{}. {}  (score {:.3})\n   {}  bytes {}..{}",
-                    rank + 1,
-                    r.artifact_title,
-                    r.relevance_score,
-                    r.chunk_id,
-                    r.byte_range.0,
-                    r.byte_range.1
-                );
+                // Owner view: raw citations, everything live.
+                None => {
+                    let results = tessera_core::search::query(
+                        &vault,
+                        &embedder,
+                        &text,
+                        &tessera_core::search::owner_constraints(),
+                        top_k,
+                    )?;
+                    if results.is_empty() {
+                        println!("No results.");
+                    }
+                    for (rank, r) in results.iter().enumerate() {
+                        println!(
+                            "{}. {}  (score {:.3})\n   {}  bytes {}..{}",
+                            rank + 1,
+                            r.artifact_title,
+                            r.relevance_score,
+                            r.chunk_id,
+                            r.byte_range.0,
+                            r.byte_range.1
+                        );
+                    }
+                }
             }
             Ok(())
         }
