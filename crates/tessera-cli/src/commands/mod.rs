@@ -41,13 +41,16 @@ pub enum Command {
     },
     /// Embed any chunks that don't have vectors yet
     Index,
-    /// Semantic search over the vault (owner view: everything live)
+    /// Semantic search over the vault (owner view unless --lens is given)
     Query {
         /// The question or search text
         text: String,
         /// Number of results
         #[arg(long, default_value_t = 5)]
         top_k: usize,
+        /// Retrieve under a lens (policy-filtered) instead of the owner view
+        #[arg(long)]
+        lens: Option<String>,
     },
     /// Manage lenses (access policies)
     Lens {
@@ -528,16 +531,30 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
             println!("Embedded {count} chunk(s).");
             Ok(())
         }
-        Command::Query { text, top_k } => {
+        Command::Query { text, top_k, lens } => {
             let vault = open_vault(&vault_path)?;
             let embedder = load_embedder()?;
-            let results = tessera_core::search::query(
-                &vault,
-                &embedder,
-                &text,
-                &tessera_core::search::owner_constraints(),
-                top_k,
-            )?;
+            let results = match lens {
+                Some(lens_id) => {
+                    let policy = tessera_core::lens::get(&vault, &tessera_core::LensId(lens_id))?;
+                    eprintln!(
+                        "(lens {}  {}  disclosure={})",
+                        policy.id.0,
+                        policy.name,
+                        policy.disclosure_mode.as_str()
+                    );
+                    tessera_core::search::search_with_lens(
+                        &vault, &embedder, &policy, &text, top_k,
+                    )?
+                }
+                None => tessera_core::search::query(
+                    &vault,
+                    &embedder,
+                    &text,
+                    &tessera_core::search::owner_constraints(),
+                    top_k,
+                )?,
+            };
             if results.is_empty() {
                 println!("No results.");
             }

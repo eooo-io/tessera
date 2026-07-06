@@ -237,6 +237,84 @@ mod tests {
     }
 
     #[test]
+    fn lens_filtering_preserves_recall_within_budget() {
+        use crate::lens::LensPolicy;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = Vault::create_with_params(&dir.path().join("V.tessera"), "pass", &TEST_PARAMS)
+            .expect("create");
+        let work = space::create(&vault, "Work", None).expect("work");
+        let personal = space::create(&vault, "Personal", None).expect("personal");
+
+        // Relevant docs live in Work; distractors live in Personal.
+        ingest_live(
+            &vault,
+            &work,
+            dir.path(),
+            "fire.md",
+            "Fire safety requirements for corridor walls demand a two hour rating.",
+        );
+        ingest_live(
+            &vault,
+            &work,
+            dir.path(),
+            "egress.md",
+            "Emergency egress routes and exit door widths depend on occupant load.",
+        );
+        ingest_live(
+            &vault,
+            &personal,
+            dir.path(),
+            "bread.md",
+            "Sourdough bread with rye flour needs a long slow fermentation.",
+        );
+        ingest_live(
+            &vault,
+            &personal,
+            dir.path(),
+            "garden.md",
+            "Tomato seedlings need hardening off before transplanting outdoors.",
+        );
+        crate::search::embed_missing(&vault, &FakeEmbedder).expect("embed");
+
+        let golden = vec![
+            GoldenItem {
+                question: "fire rating requirements corridor walls".into(),
+                expected: vec!["fire.md".into()],
+            },
+            GoldenItem {
+                question: "emergency egress exit door widths".into(),
+                expected: vec!["egress.md".into()],
+            },
+        ];
+
+        let unfiltered = run(
+            &vault,
+            &FakeEmbedder,
+            &golden,
+            &crate::search::owner_constraints(),
+        )
+        .expect("unfiltered");
+
+        let mut lens = LensPolicy::new("Work", vec![work]);
+        lens.sensitivity_ceiling = crate::artifact::Sensitivity::Restricted;
+        let filtered =
+            run(&vault, &FakeEmbedder, &golden, &lens.to_constraints()).expect("filtered");
+
+        assert!(
+            unfiltered.recall_at_10 > 0.0,
+            "unfiltered baseline must retrieve the expected docs"
+        );
+        // Acceptance (#19): policy filtering degrades Recall@10 by < 10%.
+        assert!(
+            filtered.recall_at_10 >= unfiltered.recall_at_10 * 0.9,
+            "lens filtering degraded Recall@10 by >10%: unfiltered={:.3} filtered={:.3}",
+            unfiltered.recall_at_10,
+            filtered.recall_at_10
+        );
+    }
+
+    #[test]
     fn golden_parsing_rejects_empty() {
         assert!(matches!(parse_golden("[]"), Err(EvalError::EmptyGoldenSet)));
         let items = parse_golden(r#"[{"question": "q", "expected": ["a.md"]}]"#).expect("parse");

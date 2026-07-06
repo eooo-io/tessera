@@ -164,15 +164,17 @@ impl VectorIndex for SqliteVecIndex<'_> {
 }
 
 impl SqliteVecIndex<'_> {
-    /// One KNN + policy-join statement. The `a.state = 'live'` predicate is
-    /// part of the fixed SQL text — no constraint can remove it.
-    fn search_once(
-        &self,
+    /// Build the single KNN + policy-join statement and its bound parameters.
+    ///
+    /// The `a.state = 'live'` predicate is part of the fixed SQL text — no
+    /// constraint can remove it. Kept separate from execution so the
+    /// query-plan test can `EXPLAIN QUERY PLAN` the exact hot-path SQL.
+    fn build_search_sql(
         query_blob: &[u8],
         c: &RetrievalConstraints,
         knn_k: usize,
         top_k: usize,
-    ) -> Result<Vec<ChunkRef>, IndexError> {
+    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
         let mut sql = String::from(
             "SELECT ch.id, av.artifact_id, knn.distance
              FROM (SELECT rowid, distance FROM chunk_embeddings
@@ -250,7 +252,19 @@ impl SqliteVecIndex<'_> {
 
         params.push(Box::new(top_k as i64));
         sql.push_str(&format!(" ORDER BY knn.distance LIMIT ?{}", params.len()));
+        (sql, params)
+    }
 
+    /// One KNN + policy-join statement. The `a.state = 'live'` predicate is
+    /// part of the fixed SQL text — no constraint can remove it.
+    fn search_once(
+        &self,
+        query_blob: &[u8],
+        c: &RetrievalConstraints,
+        knn_k: usize,
+        top_k: usize,
+    ) -> Result<Vec<ChunkRef>, IndexError> {
+        let (sql, params) = Self::build_search_sql(query_blob, c, knn_k, top_k);
         let conn = self.vault.conn();
         let db = |e: rusqlite::Error| IndexError::Database(e.to_string());
         let mut stmt = conn.prepare(&sql).map_err(db)?;
@@ -565,6 +579,54 @@ mod tests {
             other.insert("chunk_x", &synth(1.0, 0.0, 0.0)),
             Err(IndexError::UnknownModel(_))
         ));
+    }
+
+    /// Guards the hot retrieval path (the plan captured in
+    /// `docs/query-plan-search.md`): the sqlite-vec KNN must drive the query
+    /// and every metadata join must be index-backed. A regression that turns a
+    /// join into a full table scan fails here.
+    #[test]
+    fn hot_path_uses_knn_and_indexed_joins() {
+        let f = fixture();
+        // A fully-loaded lens exercises every optional predicate branch.
+        let c = RetrievalConstraints {
+            space_ids: vec![f.space_a.clone()],
+            space_exclude_ids: vec![f.space_b.clone()],
+            tag_include: vec!["spec".into()],
+            tag_exclude: vec!["journal".into()],
+            media_types: vec!["text/markdown".into()],
+            sensitivity_ceiling: Sensitivity::Confidential,
+        };
+        let blob = SqliteVecIndex::encode(&synth(0.5, 0.5, 0.0)).expect("encode");
+        let (sql, params) = SqliteVecIndex::build_search_sql(&blob, &c, 64, 10);
+        let conn = f.vault.conn();
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare explain");
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let plan: Vec<String> = stmt
+            .query_map(refs.as_slice(), |r| r.get::<_, String>(3))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        let rendered = plan.join("\n");
+
+        // The KNN virtual-table scan drives the query.
+        assert!(
+            plan.iter()
+                .any(|l| l.contains("chunk_embeddings") && l.contains("VIRTUAL TABLE")),
+            "KNN virtual-table scan must be present:\n{rendered}"
+        );
+        // No base metadata table is fully scanned: the only `SCAN` allowed is
+        // the vec0 virtual table; joins must all be `SEARCH ... USING INDEX`.
+        for line in &plan {
+            if line.starts_with("SCAN ") {
+                assert!(
+                    line.contains("VIRTUAL TABLE"),
+                    "unexpected full table scan on the hot path: {line}\nfull plan:\n{rendered}"
+                );
+            }
+        }
     }
 
     #[test]

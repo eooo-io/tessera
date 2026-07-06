@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::artifact::Sensitivity;
+use crate::index::RetrievalConstraints;
 use crate::space::SpaceId;
 use crate::vault::{Vault, VaultError};
 
@@ -166,6 +167,25 @@ impl LensPolicy {
             default_ttl_minutes: 60,
             created_at: ts,
             updated_at: ts,
+        }
+    }
+
+    /// Compile this policy into vector-index retrieval constraints (#19).
+    ///
+    /// The quarantine invariant (`state = 'live'`) is enforced by the index
+    /// itself and is deliberately NOT represented here — a lens cannot opt out
+    /// of it. `content_types` has no retrieval mapping yet and is not
+    /// compiled; `media_types` is the active media filter. Disclosure mode,
+    /// operations, approval, and TTL govern rendering and sessions, not the
+    /// retrieval join, so they are absent here too.
+    pub fn to_constraints(&self) -> RetrievalConstraints {
+        RetrievalConstraints {
+            space_ids: self.space_ids.clone(),
+            space_exclude_ids: self.space_exclude_ids.clone(),
+            tag_include: self.tag_include.clone(),
+            tag_exclude: self.tag_exclude.clone(),
+            media_types: self.media_types.clone(),
+            sensitivity_ceiling: self.sensitivity_ceiling,
         }
     }
 }
@@ -483,6 +503,25 @@ mod tests {
             struct_fields, schema_fields,
             "LensPolicy fields and schema properties drifted"
         );
+    }
+
+    #[test]
+    fn to_constraints_maps_filters_and_omits_quarantine() {
+        let mut p = sample();
+        p.space_exclude_ids = vec![SpaceId("space_B".into())];
+        p.tag_include = vec!["spec".into()];
+        p.tag_exclude = vec!["personal".into()];
+        p.sensitivity_ceiling = Sensitivity::Confidential;
+
+        let c = p.to_constraints();
+        assert_eq!(c.space_ids, p.space_ids);
+        assert_eq!(c.space_exclude_ids, p.space_exclude_ids);
+        assert_eq!(c.tag_include, p.tag_include);
+        assert_eq!(c.tag_exclude, p.tag_exclude);
+        assert_eq!(c.media_types, p.media_types);
+        assert_eq!(c.sensitivity_ceiling, Sensitivity::Confidential);
+        // RetrievalConstraints has no state/quarantine field to set — the
+        // index hard-codes `state = 'live'`, so a lens cannot reach it.
     }
 
     /// A fully-populated policy must satisfy its own schema — guards against

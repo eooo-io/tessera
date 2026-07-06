@@ -150,6 +150,20 @@ pub fn query(
     Ok(results)
 }
 
+/// Policy-filtered semantic search under a lens (#19). Compiles the lens into
+/// retrieval constraints and runs the identical single-query path used by the
+/// owner view — so the CLI `query --lens` and the guardian exercise the same
+/// code. The quarantine invariant is enforced by the index regardless of lens.
+pub fn search_with_lens(
+    vault: &Vault,
+    embedder: &dyn EmbeddingProvider,
+    lens: &crate::lens::LensPolicy,
+    text: &str,
+    top_k: usize,
+) -> Result<Vec<SearchResult>, SearchError> {
+    query(vault, embedder, text, &lens.to_constraints(), top_k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +277,36 @@ mod tests {
             "model registry missing entry: {:?}",
             manifest.embedding_models
         );
+    }
+
+    #[test]
+    fn search_with_lens_scopes_to_included_space() {
+        use crate::lens::LensPolicy;
+        let (_dir, vault) = corpus();
+        embed_missing(&vault, &FakeEmbedder).expect("embed");
+        let space = space::list(&vault).expect("list")[0].id.clone();
+
+        // A lens including the docs space retrieves the topical doc.
+        let mut lens = LensPolicy::new("Docs", vec![space.clone()]);
+        lens.sensitivity_ceiling = Sensitivity::Restricted;
+        let results = search_with_lens(
+            &vault,
+            &FakeEmbedder,
+            &lens,
+            "fire rating corridor walls",
+            5,
+        )
+        .expect("query");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].artifact_title, "fire.md");
+
+        // A lens excluding that same space yields nothing (exclude wins).
+        let mut blocked = LensPolicy::new("None", vec![space.clone()]);
+        blocked.space_exclude_ids = vec![space];
+        blocked.sensitivity_ceiling = Sensitivity::Restricted;
+        let none =
+            search_with_lens(&vault, &FakeEmbedder, &blocked, "fire rating", 5).expect("query");
+        assert!(none.is_empty(), "excluded space must yield no results");
     }
 
     #[test]
