@@ -16,6 +16,7 @@ use std::io::{BufRead, Write};
 use serde_json::{json, Value};
 
 use tessera_core::embed::EmbeddingProvider;
+use tessera_core::session::{self as live_session, SessionStatus};
 use tessera_core::{receipt, Vault};
 
 use crate::session::GuardianSession;
@@ -49,12 +50,20 @@ pub fn serve_stdio(
     )
     .map_err(|e| anyhow::anyhow!("opening receipt session: {e}"))?;
 
+    // Register the live session so the owner's CLI can revoke it and so it
+    // expires at its TTL. Status is re-checked on every tool call.
+    let live = live_session::start(vault, &session.pairing)
+        .map_err(|e| anyhow::anyhow!("starting session: {e}"))?;
+    let session_id = live.id;
+
     let mut embedder: Option<Box<dyn EmbeddingProvider>> = None;
 
     tracing::info!(
+        session = %session_id,
         pairing = %session.pairing.id,
         lens = %session.lens.name,
         purpose = %session.pairing.purpose,
+        expires = %live.expires_at,
         "guardian session bound; serving MCP over stdio"
     );
 
@@ -95,6 +104,33 @@ pub fn serve_stdio(
                 )?;
             }
             ("tools/call", Some(id)) => {
+                // Enforce the session lifecycle before any disclosure: a
+                // revoked or expired session ends here, and the refused call is
+                // NOT recorded. Effect is immediate on the next call.
+                match live_session::status(vault, &session_id) {
+                    Ok(SessionStatus::Active) => {}
+                    Ok(other) => {
+                        write_message(
+                            &mut out,
+                            result(
+                                id.clone(),
+                                tool_error(&format!(
+                                    "session {} — access has ended",
+                                    other.as_str()
+                                )),
+                            ),
+                        )?;
+                        break;
+                    }
+                    Err(e) => {
+                        write_message(
+                            &mut out,
+                            result(id.clone(), tool_error(&format!("session unavailable: {e}"))),
+                        )?;
+                        break;
+                    }
+                }
+
                 let params = msg.get("params");
                 let name = params
                     .and_then(|p| p.get("name"))
@@ -151,15 +187,20 @@ pub fn serve_stdio(
         }
     }
 
-    // Finalize the receipt only if the agent actually accessed anything, so a
-    // client that merely lists tools does not spawn an empty receipt.
-    if receipt.query_count() > 0 {
+    // On any exit — EOF, revocation, or expiry — finalize the receipt (if the
+    // agent accessed anything) and seal the session.
+    let receipt_id = if receipt.query_count() > 0 {
         let finalized = receipt
             .finalize()
             .map_err(|e| anyhow::anyhow!("finalizing receipt: {e}"))?;
         tracing::info!(receipt = %finalized.receipt_id, "receipt finalized");
-    }
-    tracing::info!("client disconnected; guardian session ending");
+        Some(finalized.receipt_id)
+    } else {
+        None
+    };
+    // Best-effort close (a no-op if already revoked — that status is preserved).
+    let _ = live_session::close(vault, &session_id, receipt_id.as_deref());
+    tracing::info!(session = %session_id, "guardian session ended");
     Ok(())
 }
 

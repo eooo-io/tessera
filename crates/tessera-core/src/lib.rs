@@ -16,6 +16,7 @@ pub mod pairing;
 pub mod provenance;
 pub mod receipt;
 pub mod search;
+pub mod session;
 pub mod space;
 pub mod summary;
 pub mod vault;

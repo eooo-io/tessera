@@ -78,6 +78,16 @@ pub enum Command {
         #[command(subcommand)]
         action: ReceiptsCommand,
     },
+    /// Inspect and revoke live guardian sessions
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsCommand,
+    },
+    /// Guardian management (lock / status)
+    Guardian {
+        #[command(subcommand)]
+        action: GuardianCommand,
+    },
     /// Run golden-set retrieval evaluation (exits non-zero below gate)
     Eval {
         /// Path to the golden set JSON: [{"question": "...", "expected": ["file.md"]}]
@@ -175,6 +185,28 @@ pub enum PairCommand {
         /// Pairing id
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SessionsCommand {
+    /// List all sessions and their status
+    List,
+    /// Revoke a session (takes effect on the guardian's next tool call)
+    Revoke {
+        /// Session id (omit when using --all)
+        id: Option<String>,
+        /// Revoke every active session
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GuardianCommand {
+    /// Revoke all active sessions; running guardians drop their key on the next call
+    Lock,
+    /// Show active sessions
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -837,6 +869,67 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 ReceiptsCommand::Verify => {
                     let n = receipt::verify(&vault)?;
                     println!("OK — {n} receipt(s) verified, chain intact");
+                    Ok(())
+                }
+            }
+        }
+        Command::Sessions { action } => {
+            use tessera_core::session;
+            let vault = open_vault(&vault_path)?;
+            match action {
+                SessionsCommand::List => {
+                    for s in session::list(&vault)? {
+                        println!(
+                            "{}  [{}]  lens={}  purpose={:?}  expires={}",
+                            s.id,
+                            s.effective_status().as_str(),
+                            s.lens_id,
+                            s.purpose,
+                            s.expires_at
+                        );
+                    }
+                    Ok(())
+                }
+                SessionsCommand::Revoke { id, all } => {
+                    if all {
+                        let n = session::revoke_all(&vault)?;
+                        println!("Revoked {n} active session(s).");
+                    } else if let Some(id) = id {
+                        session::revoke(&vault, &id)?;
+                        println!("Revoked session {id}");
+                    } else {
+                        bail!("provide a session id or --all");
+                    }
+                    Ok(())
+                }
+            }
+        }
+        Command::Guardian { action } => {
+            use tessera_core::session::{self, SessionStatus};
+            let vault = open_vault(&vault_path)?;
+            match action {
+                GuardianCommand::Lock => {
+                    let n = session::revoke_all(&vault)?;
+                    println!(
+                        "Locked: revoked {n} active session(s). Running guardians drop \
+                         their key on the next tool call."
+                    );
+                    Ok(())
+                }
+                GuardianCommand::Status => {
+                    let active: Vec<_> = session::list(&vault)?
+                        .into_iter()
+                        .filter(|s| s.effective_status() == SessionStatus::Active)
+                        .collect();
+                    if active.is_empty() {
+                        println!("No active sessions.");
+                    }
+                    for s in active {
+                        println!(
+                            "{}  lens={}  purpose={:?}  agent={}  expires={}",
+                            s.id, s.lens_id, s.purpose, s.agent_name, s.expires_at
+                        );
+                    }
                     Ok(())
                 }
             }
