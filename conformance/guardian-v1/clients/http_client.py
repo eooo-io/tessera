@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Minimal Guardian v1 Streamable HTTP client; Python standard library only."""
 import argparse, json, urllib.request
+from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, help="MCP endpoint")
-    parser.add_argument("--token", required=True, help="Owner-authorized OAuth token")
+    parser.add_argument("--token-file", required=True,
+                        help="Private file containing the owner-authorized OAuth token")
     parser.add_argument("--origin", required=True)
     args = parser.parse_args()
+    token = Path(args.token_file).read_text(encoding="utf-8").rstrip("\r\n")
+    if not token or "\n" in token or "\r" in token:
+        raise RuntimeError("token file must contain exactly one non-empty line")
 
     def request(payload):
         req = urllib.request.Request(args.url, json.dumps(payload).encode(), method="POST",
-            headers={"Authorization": f"Bearer {args.token}", "Origin": args.origin,
+            headers={"Authorization": f"Bearer {token}", "Origin": args.origin,
                      "Content-Type": "application/json",
                      "Accept": "application/json, text/event-stream",
                      "MCP-Protocol-Version": "2025-11-25"})

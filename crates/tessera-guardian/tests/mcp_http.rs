@@ -218,6 +218,31 @@ fn real_http_binary_runs_pkce_lens_revocation_and_receipt_lifecycle() {
         format!("{base_url}/token"),
     ]);
     let access_token = token["access_token"].as_str().expect("access token");
+    let token_file = dir.path().join("reference-client-token");
+    std::fs::write(&token_file, format!("{access_token}\n")).expect("token file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))
+            .expect("private token file");
+    }
+    let reference_client = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/guardian-v1/clients/http_client.py");
+    let reference_output = Command::new("python3")
+        .arg(reference_client)
+        .args(["--url", &format!("{base_url}/mcp"), "--token-file"])
+        .arg(&token_file)
+        .args(["--origin", "https://client.example"])
+        .output()
+        .expect("run checked-in HTTP reference client");
+    assert!(
+        reference_output.status.success(),
+        "HTTP reference client failed: {}",
+        String::from_utf8_lossy(&reference_output.stderr)
+    );
+    let reference_stdout = String::from_utf8(reference_output.stdout).expect("client utf8");
+    assert!(reference_stdout.contains("tessera.guardian.v1"));
+    assert!(reference_stdout.contains("vault_query"));
     let mcp_call = |message: Value| {
         curl_json(&[
             "-sS".into(),

@@ -70,6 +70,13 @@ fn reference_clients_are_stdlib_only_and_request_v1() {
         assert!(source.contains("tessera.guardian.v1"));
         assert!(!source.contains("import requests"));
     }
+    let http = fs::read_to_string(root().join("conformance/guardian-v1/clients/http_client.py"))
+        .expect("HTTP client");
+    assert!(http.contains("--token-file"));
+    assert!(
+        !http.contains("--token\""),
+        "bearer token must not be a CLI value"
+    );
 }
 
 #[test]
