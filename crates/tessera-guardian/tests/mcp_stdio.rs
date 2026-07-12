@@ -151,10 +151,40 @@ fn initialize_handshake_succeeds_for_approved_pairing() {
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["result"]["serverInfo"]["name"], "tessera-guardian");
     assert_eq!(resp["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(
+        resp["result"]["capabilities"]["experimental"]["tessera.guardian"]["contractVersion"],
+        "tessera.guardian.v1"
+    );
     assert!(
         resp["result"]["capabilities"]["tools"].is_object(),
         "advertises tools capability"
     );
+}
+
+#[test]
+fn incompatible_consumer_contract_fails_initialize_cleanly() {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "contract test", "agent", 60).expect("approve");
+    drop(vault);
+    let mut client = StdioClient::start(&path, &pairing.id);
+    let response = client.request(serde_json::json!({
+        "jsonrpc":"2.0", "id":1, "method":"initialize",
+        "params": {"capabilities": {"experimental": {
+            "tessera.guardian": {"contractVersion":"tessera.guardian.v999"}
+        }}}
+    }));
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(
+        response["error"]["data"]["requested"],
+        "tessera.guardian.v999"
+    );
+    assert_eq!(
+        response["error"]["data"]["supported"],
+        serde_json::json!(["tessera.guardian.v1"])
+    );
+    assert!(client.close().success());
 }
 
 #[test]

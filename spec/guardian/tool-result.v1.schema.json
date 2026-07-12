@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tessera.dev/schema/guardian/tool-result.v1.schema.json",
+  "title": "Tessera Guardian tool result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "tool", "trust", "authorization", "evidence", "spaces", "error"],
+  "properties": {
+    "schema_version": { "const": "tessera.guardian.tool-result.v1" },
+    "status": { "enum": ["results", "no_result", "error"] },
+    "tool": { "type": "string" },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "instruction_authority", "consumer_notice"],
+      "properties": {
+        "classification": { "const": "untrusted_evidence_boundary" },
+        "instruction_authority": { "const": "none" },
+        "consumer_notice": { "type": "string" }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "lens_id", "lens_name", "purpose", "disclosure_mode"],
+      "properties": {
+        "classification": { "const": "owner_approved_metadata" },
+        "lens_id": { "type": "string", "pattern": "^lens_" },
+        "lens_name": { "type": "string" },
+        "purpose": { "type": "string" },
+        "disclosure_mode": { "enum": ["summary", "excerpt", "full"] }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+    "spaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["classification", "space_id", "name"],
+        "properties": {
+          "classification": { "const": "untrusted_metadata" },
+          "space_id": { "type": "string", "pattern": "^space_" },
+          "name": { "type": "string" }
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["classification", "code", "diagnostic"],
+          "properties": {
+            "classification": { "const": "untrusted_diagnostic" },
+            "code": {
+              "enum": [
+                "authorization_ended",
+                "metadata_denied",
+                "model_unavailable",
+                "policy_or_source_error",
+                "rate_limited",
+                "session_ended",
+                "session_unavailable",
+                "tool_failed"
+              ]
+            },
+            "diagnostic": { "type": "string" }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "nullableRange": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "content_kind", "artifact_id", "title", "provenance", "citation", "disclosure", "content"],
+      "properties": {
+        "classification": { "const": "untrusted_evidence" },
+        "content_kind": { "enum": ["document_text", "historical_message", "historical_code", "historical_tool_call", "historical_tool_result", "transcript_turn"] },
+        "artifact_id": { "type": "string", "pattern": "^art_" },
+        "title": { "type": ["string", "null"] },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_type", "artifact_id", "exact_disclosure_recorded_in_receipt", "source_claims_verified"],
+          "properties": {
+            "source_type": { "const": "tessera_artifact" },
+            "artifact_id": { "type": "string", "pattern": "^art_" },
+            "exact_disclosure_recorded_in_receipt": { "const": true },
+            "source_claims_verified": { "const": false }
+          }
+        },
+        "citation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_id", "disclosed_range", "timestamp_range", "content_hash", "exact_disclosure_recorded_in_receipt"],
+          "properties": {
+            "artifact_id": { "type": "string", "pattern": "^art_" },
+            "disclosed_range": { "$ref": "#/$defs/nullableRange" },
+            "timestamp_range": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["start_ms", "end_ms", "start", "end"],
+                  "properties": {
+                    "start_ms": { "type": "integer", "minimum": 0 },
+                    "end_ms": { "type": "integer", "minimum": 0 },
+                    "start": { "type": "string" },
+                    "end": { "type": "string" }
+                  }
+                }
+              ]
+            },
+            "source_url": { "type": ["string", "null"], "format": "uri" },
+            "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "exact_disclosure_recorded_in_receipt": { "const": true }
+          }
+        },
+        "disclosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested_mode", "applied_mode", "bytes_disclosed", "full_disclosure"],
+          "properties": {
+            "requested_mode": { "enum": ["summary", "excerpt", "full"] },
+            "applied_mode": { "enum": ["summary", "excerpt", "full"] },
+            "bytes_disclosed": { "type": "integer", "minimum": 0 },
+            "full_disclosure": { "type": "boolean" }
+          }
+        },
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string", "maxLength": 65536 }
+          }
+        }
+      }
+    }
+  }
+}

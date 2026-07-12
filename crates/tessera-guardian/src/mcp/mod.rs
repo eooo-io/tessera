@@ -24,6 +24,7 @@ use crate::session::GuardianSession;
 
 /// MCP protocol revision this server speaks.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+pub const CONTRACT_VERSION: &str = "tessera.guardian.v1";
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 fn read_bounded_line(
@@ -87,7 +88,7 @@ pub fn handle_http_message(
         return Ok(None);
     };
     let response = match method {
-        "initialize" => result(id, initialize_result(session)),
+        "initialize" => initialize_response(id, session, msg),
         "ping" => result(id, json!({})),
         "tools/list" => result(id, json!({ "tools": tools::definitions(session) })),
         "tools/call" => handle_http_tool(vault, session, msg, id)?,
@@ -311,7 +312,7 @@ pub fn serve_stdio(
 
         match (method, id) {
             ("initialize", Some(id)) => {
-                write_message(&mut out, result(id, initialize_result(session)))?;
+                write_message(&mut out, initialize_response(id, session, &msg))?;
             }
             ("ping", Some(id)) => {
                 write_message(&mut out, result(id, json!({})))?;
@@ -494,7 +495,16 @@ pub fn serve_stdio(
 fn initialize_result(session: &GuardianSession) -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
+        "capabilities": {
+            "tools": {},
+            "experimental": {
+                "tessera.guardian": {
+                    "contractVersion": CONTRACT_VERSION,
+                    "toolResultSchema": tools::RESULT_SCHEMA_VERSION,
+                    "maxMessageBytes": MAX_MESSAGE_BYTES,
+                }
+            }
+        },
         "serverInfo": {
             "name": "tessera-guardian",
             "version": env!("CARGO_PKG_VERSION"),
@@ -508,6 +518,27 @@ fn initialize_result(session: &GuardianSession) -> Value {
             session.lens.name, session.pairing.purpose
         ),
     })
+}
+
+fn initialize_response(id: Value, session: &GuardianSession, message: &Value) -> Value {
+    let requested = message
+        .pointer("/params/capabilities/experimental/tessera.guardian/contractVersion")
+        .and_then(Value::as_str);
+    if requested.is_some_and(|version| version != CONTRACT_VERSION) {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32602,
+                "message": "unsupported Tessera Guardian consumer contract",
+                "data": {
+                    "requested": requested,
+                    "supported": [CONTRACT_VERSION],
+                }
+            }
+        });
+    }
+    result(id, initialize_result(session))
 }
 
 fn result(id: Value, result: Value) -> Value {

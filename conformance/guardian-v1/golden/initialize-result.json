@@ -1,0 +1,1 @@
+{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"experimental":{"tessera.guardian":{"contractVersion":"tessera.guardian.v1","toolResultSchema":"tessera.guardian.tool-result.v1","maxMessageBytes":1048576}}},"serverInfo":{"name":"tessera-guardian","version":"0.2.0"},"instructions":"Synthetic conformance fixture; runtime text is owner pairing metadata."}

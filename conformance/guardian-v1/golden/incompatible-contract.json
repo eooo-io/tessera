@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"unsupported Tessera Guardian consumer contract","data":{"requested":"tessera.guardian.v999","supported":["tessera.guardian.v1"]}}}
