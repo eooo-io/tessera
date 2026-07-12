@@ -715,10 +715,42 @@ mod tests {
             .await
             .expect("initialize");
         assert_eq!(initialize.status(), StatusCode::OK);
+        let initialize_json = json_body(initialize).await;
         assert_eq!(
-            json_body(initialize).await["result"]["protocolVersion"],
+            initialize_json["result"]["protocolVersion"],
             mcp::PROTOCOL_VERSION
         );
+        assert_eq!(
+            initialize_json["result"]["capabilities"]["experimental"]["tessera.guardian"]
+                ["contractVersion"],
+            mcp::CONTRACT_VERSION
+        );
+
+        let incompatible = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                    .header(header::ORIGIN, "https://tessera.example")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "jsonrpc":"2.0", "id":99, "method":"initialize",
+                            "params":{"capabilities":{"experimental":{
+                                "tessera.guardian":{"contractVersion":"tessera.guardian.v999"}
+                            }}}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("incompatible initialize");
+        assert_eq!(incompatible.status(), StatusCode::OK);
+        assert_eq!(json_body(incompatible).await["error"]["code"], -32602);
 
         let call = |artifact_id: &str, id: u64| {
             Request::builder()

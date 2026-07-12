@@ -68,6 +68,10 @@ client and lens. Setup and TLS-boundary guidance are in
 [`docs/http-oauth.md`](docs/http-oauth.md). Real-binary stdio and HTTP lifecycle
 coverage, adversarial cases, and remaining limitations are recorded in
 [`docs/evidence/mcp-integration-report.md`](docs/evidence/mcp-integration-report.md).
+The versioned consumer surface, negotiation rules, checked-in schemas, and
+portable synthetic clients are documented in
+[`docs/guardian-consumer-contract-v1.md`](docs/guardian-consumer-contract-v1.md)
+and [`conformance/guardian-v1/`](conformance/guardian-v1/).
 
 Purpose, identity, pairing reuse, lens changes, expiry, and revocation have
 deliberately narrow semantics. In particular, purpose is recorded but not

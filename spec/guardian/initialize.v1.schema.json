@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tessera.dev/schema/guardian/initialize.v1.schema.json",
+  "title": "Tessera Guardian initialize result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "capabilities", "serverInfo", "instructions"],
+  "properties": {
+    "protocolVersion": { "const": "2025-11-25" },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools", "experimental"],
+      "properties": {
+        "tools": { "type": "object" },
+        "experimental": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tessera.guardian"],
+          "properties": {
+            "tessera.guardian": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["contractVersion", "toolResultSchema", "maxMessageBytes"],
+              "properties": {
+                "contractVersion": { "const": "tessera.guardian.v1" },
+                "toolResultSchema": { "const": "tessera.guardian.tool-result.v1" },
+                "maxMessageBytes": { "const": 1048576 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "serverInfo": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "tessera-guardian" },
+        "version": { "type": "string" }
+      }
+    },
+    "instructions": { "type": "string" }
+  }
+}
