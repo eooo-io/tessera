@@ -121,6 +121,17 @@ the v0.1 thresholds are predeclared in
 [`docs/evidence/private-eval-thresholds-v0.1.md`](docs/evidence/private-eval-thresholds-v0.1.md).
 Raw private plans, queries, source text, and raw results stay outside Git.
 
+## Untrusted evidence boundary
+
+Guardian tool results use the versioned
+`tessera.guardian.tool-result.v1` structured envelope. Retrieved text, titles,
+space names, historical code/tool events, and diagnostics are explicitly
+classified as untrusted data with no instruction authority. The text fallback
+is a serialized copy of the same JSON object, so source text cannot escape by
+spoofing Markdown, XML, or JSON-RPC delimiters. Consumer duties and residual
+limits are documented in
+[`docs/untrusted-content-boundary.md`](docs/untrusted-content-boundary.md).
+
 ## Project Structure
 
 ```

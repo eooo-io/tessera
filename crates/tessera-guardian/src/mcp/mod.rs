@@ -98,7 +98,12 @@ fn handle_http_tool(
     let response = if let Some(Err(error)) = &embedder {
         result(
             id,
-            tool_error(&format!("embedding model unavailable: {error}")),
+            tools::failure(
+                session,
+                name,
+                "model_unavailable",
+                &format!("embedding model unavailable: {error}"),
+            ),
         )
     } else {
         let provider = embedder
@@ -110,7 +115,9 @@ fn handle_http_tool(
             Err(tools::ToolError::UnknownTool(name)) => {
                 error(id, -32601, &format!("unknown tool: {name}"))
             }
-            Err(tools::ToolError::Failed(message)) => result(id, tool_error(&message)),
+            Err(tools::ToolError::Failed(message)) => {
+                result(id, tools::failure(session, name, "tool_failed", &message))
+            }
         }
     };
     let finalized = if receipt_session.has_activity() {
@@ -214,43 +221,6 @@ pub fn serve_stdio(
                 )?;
             }
             ("tools/call", Some(id)) => {
-                // Enforce the session lifecycle before any disclosure: a
-                // revoked or expired session ends here, and the refused call is
-                // NOT recorded. Effect is immediate on the next call.
-                match live_session::status(vault, &session_id) {
-                    Ok(SessionStatus::Active) => {}
-                    Ok(other) => {
-                        write_message(
-                            &mut out,
-                            result(
-                                id.clone(),
-                                tool_error(&format!(
-                                    "session {} — access has ended",
-                                    other.as_str()
-                                )),
-                            ),
-                        )?;
-                        break;
-                    }
-                    Err(e) => {
-                        write_message(
-                            &mut out,
-                            result(id.clone(), tool_error(&format!("session unavailable: {e}"))),
-                        )?;
-                        break;
-                    }
-                }
-                if let Err(error) = session.authorize_call(vault) {
-                    write_message(
-                        &mut out,
-                        result(
-                            id.clone(),
-                            tool_error(&format!("authorization ended: {error}")),
-                        ),
-                    )?;
-                    break;
-                }
-
                 let params = msg.get("params");
                 let name = params
                     .and_then(|p| p.get("name"))
@@ -262,6 +232,57 @@ pub fn serve_stdio(
                     .cloned()
                     .unwrap_or_else(|| json!({}));
 
+                // Enforce the session lifecycle before any disclosure: a
+                // revoked or expired session ends here, and the refused call is
+                // NOT recorded. Effect is immediate on the next call.
+                match live_session::status(vault, &session_id) {
+                    Ok(SessionStatus::Active) => {}
+                    Ok(other) => {
+                        write_message(
+                            &mut out,
+                            result(
+                                id.clone(),
+                                tools::failure(
+                                    session,
+                                    &name,
+                                    "session_ended",
+                                    &format!("session {} — access has ended", other.as_str()),
+                                ),
+                            ),
+                        )?;
+                        break;
+                    }
+                    Err(e) => {
+                        write_message(
+                            &mut out,
+                            result(
+                                id.clone(),
+                                tools::failure(
+                                    session,
+                                    &name,
+                                    "session_unavailable",
+                                    &format!("session unavailable: {e}"),
+                                ),
+                            ),
+                        )?;
+                        break;
+                    }
+                }
+                if let Err(error) = session.authorize_call(vault) {
+                    write_message(
+                        &mut out,
+                        result(
+                            id.clone(),
+                            tools::failure(
+                                session,
+                                &name,
+                                "authorization_ended",
+                                &format!("authorization ended: {error}"),
+                            ),
+                        ),
+                    )?;
+                    break;
+                }
                 // Per-session rate limit over a rolling 60s window (disclosing
                 // tools only). Exceeding it returns a retryable error, records a
                 // rate-limit event in the receipt, and does NOT dispatch.
@@ -279,10 +300,15 @@ pub fn serve_stdio(
                             &mut out,
                             result(
                                 id,
-                                tool_error(&format!(
-                                    "rate limit exceeded ({limit} queries/min) — retryable; \
-                                     retry in ~{retry_after}s"
-                                )),
+                                tools::failure(
+                                    session,
+                                    &name,
+                                    "rate_limited",
+                                    &format!(
+                                        "rate limit exceeded ({limit} queries/min) — retryable; \
+                                         retry in ~{retry_after}s"
+                                    ),
+                                ),
                             ),
                         )?;
                         continue;
@@ -299,7 +325,12 @@ pub fn serve_stdio(
                                 &mut out,
                                 result(
                                     id,
-                                    tool_error(&format!("embedding model unavailable: {e}")),
+                                    tools::failure(
+                                        session,
+                                        &name,
+                                        "model_unavailable",
+                                        &format!("embedding model unavailable: {e}"),
+                                    ),
                                 ),
                             )?;
                             continue;
@@ -319,7 +350,9 @@ pub fn serve_stdio(
                     Err(tools::ToolError::UnknownTool(n)) => {
                         error(id, -32601, &format!("unknown tool: {n}"))
                     }
-                    Err(tools::ToolError::Failed(m)) => result(id, tool_error(&m)),
+                    Err(tools::ToolError::Failed(m)) => {
+                        result(id, tools::failure(session, &name, "tool_failed", &m))
+                    }
                 };
                 write_message(&mut out, response)?;
             }
@@ -377,12 +410,6 @@ fn result(id: Value, result: Value) -> Value {
 
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-}
-
-/// An MCP tool result flagged as an execution error (distinct from a JSON-RPC
-/// protocol error) — the model sees the message and can adapt.
-fn tool_error(message: &str) -> Value {
-    json!({ "content": [{ "type": "text", "text": message }], "isError": true })
 }
 
 fn write_message(out: &mut impl Write, message: Value) -> std::io::Result<()> {
