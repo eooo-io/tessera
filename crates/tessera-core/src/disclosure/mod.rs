@@ -61,6 +61,8 @@ pub enum DisclosureError {
     Database(#[from] rusqlite::Error),
     #[error("transcript error: {0}")]
     Transcript(#[from] crate::transcript::TranscriptError),
+    #[error("web provenance error: {0}")]
+    Web(#[from] crate::web::WebError),
 }
 
 /// Semantic type of disclosed evidence. Historical code and tool events are
@@ -107,6 +109,8 @@ pub struct RenderedContext {
     pub disclosed_range: Option<(u64, u64)>,
     /// Source-media time covered by the disclosed transcript turns.
     pub timestamp_range: Option<crate::transcript::TimestampRange>,
+    /// Canonical owner-added web source, when this artifact is a web clip.
+    pub source_url: Option<String>,
     /// True only when the full derived text was actually returned. The receipt
     /// layer logs this loudly.
     pub full_disclosure: bool,
@@ -124,6 +128,10 @@ pub fn render(
     allow_full: bool,
 ) -> Result<RenderedContext, DisclosureError> {
     let title = lens.allow_metadata.then(|| result.artifact_title.clone());
+    let source_url = lens
+        .allow_metadata
+        .then(|| result.source_url.clone())
+        .flatten();
 
     // Fail-closed: an un-permitted full lens becomes an excerpt.
     let mode = match lens.disclosure_mode {
@@ -145,6 +153,7 @@ pub fn render(
                 bytes_disclosed: 0,
                 disclosed_range: None,
                 timestamp_range: None,
+                source_url: source_url.clone(),
                 full_disclosure: false,
             })
         }
@@ -178,6 +187,7 @@ pub fn render(
                 bytes_disclosed: bytes,
                 disclosed_range: Some((start as u64, start as u64 + bytes)),
                 timestamp_range,
+                source_url: source_url.clone(),
                 full_disclosure: false,
             })
         }
@@ -203,6 +213,7 @@ pub fn render(
                 bytes_disclosed: bytes,
                 disclosed_range: Some((0, bytes)),
                 timestamp_range,
+                source_url,
                 full_disclosure: true,
             })
         }
@@ -266,6 +277,11 @@ pub fn render_item(
     }
     let art = artifact::get(vault, artifact_id)?;
     let title = lens.allow_metadata.then_some(art.filename);
+    let source_url = if lens.allow_metadata {
+        crate::web::source_for_artifact(vault, artifact_id)?.map(|source| source.final_url)
+    } else {
+        None
+    };
 
     let mode = match lens.disclosure_mode {
         DisclosureMode::Full if !allow_full => DisclosureMode::Excerpt,
@@ -286,6 +302,7 @@ pub fn render_item(
                 bytes_disclosed: 0,
                 disclosed_range: None,
                 timestamp_range: None,
+                source_url: source_url.clone(),
                 full_disclosure: false,
             })
         }
@@ -313,6 +330,7 @@ pub fn render_item(
                 bytes_disclosed: bytes,
                 disclosed_range: Some((0, bytes)),
                 timestamp_range,
+                source_url: source_url.clone(),
                 full_disclosure: false,
             })
         }
@@ -338,6 +356,7 @@ pub fn render_item(
                 bytes_disclosed: bytes,
                 disclosed_range: Some((0, bytes)),
                 timestamp_range,
+                source_url,
                 full_disclosure: true,
             })
         }
@@ -452,6 +471,7 @@ mod tests {
             relevance_score: 1.0,
             byte_range: (first.byte_offset_start, first.byte_offset_end),
             timestamp_range: None,
+            source_url: None,
         };
         let derived_text = extract::read_derived_text(&vault, &derived).expect("read");
         (dir, vault, result, derived_text)

@@ -114,6 +114,16 @@ metadata-hardening work tracked separately for v0.1. Chunks over transcript
 derivations pack whole turn ranges and do not split a speaker turn to meet the
 target token count.
 
+Migration 0017 adds `web_staging` and `web_sources`. `web_staging` is the
+recoverable association between an explicitly fetched Markdown file in
+`inbox/` and its requested/final URL, extracted title/publication date, and
+fetch time. Intake moves that association transactionally to `web_sources`,
+keyed to the exact artifact version, before removing the staged file. Fetched
+HTML is bounded temporary input and is not retained; extracted Markdown follows
+the normal encrypted-blob pipeline. URLs, titles, dates, fetch times, and
+staging filenames are plaintext metadata subject to the same v1 limitation and
+#50 hardening boundary.
+
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated
