@@ -56,6 +56,7 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # Text extraction
 pdf-extract = "0.7"
+dom_smoothie = "0.18"
 
 # Logging / tracing
 tracing = "0.1"

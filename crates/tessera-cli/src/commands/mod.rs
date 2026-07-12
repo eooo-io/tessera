@@ -196,6 +196,11 @@ pub enum InboxCommand {
         /// Files to stage
         paths: Vec<std::path::PathBuf>,
     },
+    /// Fetch one explicit public article URL and stage clean Markdown
+    AddUrl {
+        /// Canonical article URL (redirects are not followed)
+        url: String,
+    },
     /// List staged files
     Status,
     /// Ingest staged files (intake + extraction + chunking)
@@ -704,6 +709,9 @@ fn print_review_item(item: &tessera_core::review::ReviewItem) {
                 .as_deref()
                 .unwrap_or("none")
         );
+        if let Some(source_url) = &provenance.source_url {
+            println!("  web source: {}", terminal_safe(source_url));
+        }
     }
     for error in &item.processing_errors {
         println!(
@@ -912,16 +920,31 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
             }
         }
         Command::Inbox { action } => {
-            let vault = open_vault(&vault_path)?;
             match action {
                 InboxCommand::Add { paths } => {
+                    let vault = open_vault(&vault_path)?;
                     let staged = tessera_core::inbox::add(&vault, &paths)?;
                     for path in staged {
                         println!("Staged {}", path.display());
                     }
                     Ok(())
                 }
+                InboxCommand::AddUrl { url } => {
+                    // Fetch before unlocking the vault so network activity
+                    // never extends the lifetime of the in-memory DEK.
+                    let fetched = tessera_core::web::fetch_article(&url)?;
+                    let title = fetched.article.title.clone();
+                    let vault = open_vault(&vault_path)?;
+                    let staged = tessera_core::web::stage_article(&vault, &fetched)?;
+                    println!(
+                        "Staged web article {}  {}",
+                        terminal_safe(&title),
+                        staged.display()
+                    );
+                    Ok(())
+                }
                 InboxCommand::Status => {
+                    let vault = open_vault(&vault_path)?;
                     let staged = tessera_core::inbox::status(&vault)?;
                     if staged.is_empty() {
                         println!("Inbox is empty.");
@@ -933,6 +956,7 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     Ok(())
                 }
                 InboxCommand::Process { space } => {
+                    let vault = open_vault(&vault_path)?;
                     let space = resolve_space(&vault, space)?;
                     run_inbox_pipeline(&vault, &space)?;
                     Ok(())
@@ -1022,6 +1046,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         if let Some(range) = rc.timestamp_range {
                             println!("   (media {}..{})", range.start_label(), range.end_label());
                         }
+                        if let Some(source_url) = &rc.source_url {
+                            println!("   source {}", terminal_safe(source_url));
+                        }
                     }
                     let receipt = session.finalize()?;
                     eprintln!(
@@ -1053,6 +1080,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         );
                         if let Some(range) = r.timestamp_range {
                             println!("   media {}..{}", range.start_label(), range.end_label());
+                        }
+                        if let Some(source_url) = &r.source_url {
+                            println!("   source {}", terminal_safe(source_url));
                         }
                     }
                 }
@@ -1567,6 +1597,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                                 rec.tool_version.as_deref().unwrap_or("?"),
                                 rec.locality
                             );
+                            if let Some(source_url) = rec.source_url {
+                                println!("    source {}", terminal_safe(&source_url));
+                            }
                         }
                     }
                     if report.has_fatal() {

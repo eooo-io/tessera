@@ -24,6 +24,7 @@ pub mod space;
 pub mod summary;
 pub mod transcript;
 pub mod vault;
+pub mod web;
 
 // Cross-cutting policy-enforcement paranoia suite (#20): proves no lens can
 // ever surface content it is not entitled to. Test-only; spans lens + index.

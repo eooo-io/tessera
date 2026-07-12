@@ -24,6 +24,12 @@ pub struct ProvenanceRecord {
     pub tool_version: Option<String>,
     pub locality: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_published_at: Option<String>,
 }
 
 /// Integrity check: derived-text blobs that lack a provenance row.
@@ -48,9 +54,11 @@ pub fn chain_for(
 ) -> Result<Vec<ProvenanceRecord>, ProvenanceError> {
     let mut stmt = vault.conn().prepare(
         "SELECT p.id, p.derived_blob_hash, p.source_artifact_version_id, p.tool,
-                p.tool_version, p.locality, p.created_at
+                p.tool_version, p.locality, p.created_at, ws.final_url, ws.title,
+                ws.published_at
          FROM provenance p
          JOIN artifact_versions av ON av.id = p.source_artifact_version_id
+         LEFT JOIN web_sources ws ON ws.artifact_version_id = av.id
          WHERE av.artifact_id = ?1
          ORDER BY av.version DESC, p.created_at",
     )?;
@@ -64,6 +72,9 @@ pub fn chain_for(
                 tool_version: r.get(4)?,
                 locality: r.get(5)?,
                 created_at: r.get(6)?,
+                source_url: r.get(7)?,
+                source_title: r.get(8)?,
+                source_published_at: r.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
