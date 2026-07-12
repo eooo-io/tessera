@@ -1019,6 +1019,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         if let Some((s, e)) = rc.disclosed_range {
                             println!("   (bytes {s}..{e})");
                         }
+                        if let Some(range) = rc.timestamp_range {
+                            println!("   (media {}..{})", range.start_label(), range.end_label());
+                        }
                     }
                     let receipt = session.finalize()?;
                     eprintln!(
@@ -1048,6 +1051,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                             r.byte_range.0,
                             r.byte_range.1
                         );
+                        if let Some(range) = r.timestamp_range {
+                            println!("   media {}..{}", range.start_label(), range.end_label());
+                        }
                     }
                 }
             }

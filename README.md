@@ -107,6 +107,19 @@ failed, or empty processing results unless the owner also passes
 `--allow-incomplete`. That override is deliberately loud; a filename is not a
 content review, no matter how confident the flag looks.
 
+## Transcript ingestion
+
+VTT and SRT files are parsed into normalized speaker turns with exact
+media-time ranges. Plain `.txt` files use the transcript path only
+when at least two `Speaker: text` lines are recognized; bracketed timestamps
+such as `[00:01.000 --> 00:02.500]` are preserved when present. Ordinary text
+remains on the passthrough extractor.
+
+Transcript chunks pack whole turns, even when one turn exceeds the normal
+target size. Owner CLI results and Guardian citations include the covered media
+time range; source text remains untrusted evidence under the same lens,
+quarantine, disclosure, and receipt path as documents.
+
 ## Relevance minimization
 
 Semantic queries use cosine similarity over normalized MiniLM vectors and

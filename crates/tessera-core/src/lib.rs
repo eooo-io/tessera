@@ -22,6 +22,7 @@ pub mod search;
 pub mod session;
 pub mod space;
 pub mod summary;
+pub mod transcript;
 pub mod vault;
 
 // Cross-cutting policy-enforcement paranoia suite (#20): proves no lens can

@@ -18,6 +18,10 @@ pub enum ChunkError {
     Extract(#[from] crate::extract::ExtractError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("transcript error: {0}")]
+    Transcript(#[from] crate::transcript::TranscriptError),
+    #[error("invalid transcript turn coordinates: {0}")]
+    InvalidTranscriptTurns(String),
 }
 
 /// Chunking parameters (estimated tokens).
@@ -118,6 +122,53 @@ pub fn split_sentences(text: &str) -> Vec<(usize, usize)> {
 /// with back-overlap. Returns byte ranges into `text`.
 pub fn chunk_ranges(text: &str, params: &ChunkParams) -> Vec<(usize, usize)> {
     let segments = split_sentences(text);
+    pack_segments(text, &segments, params)
+}
+
+/// Pack whole transcript turns into chunks. No speaker turn is split merely
+/// to satisfy the target size; an unusually large turn remains one chunk.
+pub fn turn_chunk_ranges(
+    text: &str,
+    turns: &[crate::transcript::TranscriptTurn],
+    params: &ChunkParams,
+) -> Result<Vec<(usize, usize)>, ChunkError> {
+    let segments: Vec<(usize, usize)> = turns
+        .iter()
+        .map(|turn| {
+            (
+                turn.byte_offset_start as usize,
+                turn.byte_offset_end as usize,
+            )
+        })
+        .collect();
+    let mut expected_start = 0;
+    for (start, end) in &segments {
+        if *start != expected_start
+            || *start >= *end
+            || *end > text.len()
+            || !text.is_char_boundary(*start)
+            || !text.is_char_boundary(*end)
+        {
+            return Err(ChunkError::InvalidTranscriptTurns(format!(
+                "expected contiguous UTF-8 range at {expected_start}, found {start}..{end}"
+            )));
+        }
+        expected_start = *end;
+    }
+    if expected_start != text.len() {
+        return Err(ChunkError::InvalidTranscriptTurns(format!(
+            "turns end at {expected_start}, derived text ends at {}",
+            text.len()
+        )));
+    }
+    Ok(pack_segments(text, &segments, params))
+}
+
+fn pack_segments(
+    text: &str,
+    segments: &[(usize, usize)],
+    params: &ChunkParams,
+) -> Vec<(usize, usize)> {
     if segments.is_empty() {
         return Vec::new();
     }
@@ -176,9 +227,15 @@ pub fn chunk_derived_text(
     }
 
     let text = crate::extract::read_derived_text(vault, derived)?;
+    let turns = crate::transcript::turns_for_derived(vault, &derived.id)?;
+    let ranges = if turns.is_empty() {
+        chunk_ranges(&text, params)
+    } else {
+        turn_chunk_ranges(&text, &turns, params)?
+    };
     let now = chrono::Utc::now();
     let mut chunks = Vec::new();
-    for (index, (start, end)) in chunk_ranges(&text, params).into_iter().enumerate() {
+    for (index, (start, end)) in ranges.into_iter().enumerate() {
         let slice = &text[start..end];
         let chunk = Chunk {
             id: format!("chunk_{}", ulid::Ulid::new()),

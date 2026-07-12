@@ -18,6 +18,8 @@ pub enum SearchError {
     Vault(#[from] VaultError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("transcript error: {0}")]
+    Transcript(#[from] crate::transcript::TranscriptError),
     #[error("no relevance calibration for embedding model {0}; refusing disclosure")]
     UncalibratedModel(String),
 }
@@ -30,6 +32,8 @@ pub struct SearchResult {
     pub chunk_id: String,
     pub relevance_score: f32,
     pub byte_range: (u64, u64),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_range: Option<crate::transcript::TimestampRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -362,15 +366,22 @@ fn query_candidates(
 
     let mut results = Vec::with_capacity(hits.len());
     for hit in hits {
-        let (title, start, end): (String, i64, i64) = vault.conn().query_row(
-            "SELECT a.filename, ch.byte_offset_start, ch.byte_offset_end
+        let (title, derived_text_id, start, end): (String, String, i64, i64) =
+            vault.conn().query_row(
+                "SELECT a.filename, ch.derived_text_id, ch.byte_offset_start, ch.byte_offset_end
              FROM chunks ch
              JOIN derived_text dt ON dt.id = ch.derived_text_id
              JOIN artifact_versions av ON av.id = dt.artifact_version_id
              JOIN artifacts a ON a.id = av.artifact_id
              WHERE ch.id = ?1",
-            [hit.chunk_id.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                [hit.chunk_id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+        let timestamp_range = crate::transcript::timestamp_range_for_derived_range(
+            vault,
+            &derived_text_id,
+            start as u64,
+            end as u64,
         )?;
         results.push(SearchResult {
             artifact_id: hit.artifact_id,
@@ -379,6 +390,7 @@ fn query_candidates(
             // For unit vectors, L2² = 2 − 2·cos ⇒ cos = 1 − d²/2.
             relevance_score: 1.0 - (hit.distance * hit.distance) / 2.0,
             byte_range: (start as u64, end as u64),
+            timestamp_range,
         });
     }
     Ok(results)

@@ -31,6 +31,8 @@ pub enum ExtractError {
     Database(#[from] rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("transcript error: {0}")]
+    Transcript(#[from] crate::transcript::TranscriptError),
 }
 
 /// A stored extraction output.
@@ -61,6 +63,8 @@ pub fn pandoc_available() -> bool {
 fn extractor_for(media_type: &str) -> Option<(&'static str, String)> {
     match media_type {
         "text/markdown" | "text/plain" => Some(("passthrough", "1".to_owned())),
+        "text/vtt" => Some(("transcript-vtt", "1".to_owned())),
+        "application/x-subrip" => Some(("transcript-srt", "1".to_owned())),
         "application/pdf" => Some(("pdf-extract", "0.7".to_owned())),
         DOCX_MIME => Some(("pandoc", "docx-markdown-1".to_owned())),
         _ => None,
@@ -110,7 +114,7 @@ pub fn extract_text(
     artifact: &ArtifactId,
 ) -> Result<Option<DerivedText>, ExtractError> {
     let art = crate::artifact::get(vault, artifact)?;
-    let Some((extractor, extractor_version)) = extractor_for(&art.media_type) else {
+    let Some((mut extractor, extractor_version)) = extractor_for(&art.media_type) else {
         return Ok(None);
     };
 
@@ -126,6 +130,14 @@ pub fn extract_text(
             rusqlite::Error::QueryReturnedNoRows => ExtractError::NoVersions(artifact.0.clone()),
             other => ExtractError::Database(other),
         })?;
+
+    let dek = vault.dek()?;
+    let original = vault.blobs().get(dek, &BlobHash(original_hash))?;
+    let original_text = String::from_utf8_lossy(&original);
+    let parsed_transcript = crate::transcript::parse(&art.media_type, &original_text)?;
+    if art.media_type == "text/plain" && parsed_transcript.is_some() {
+        extractor = "transcript-plain";
+    }
 
     // Skip when this extractor version already ran on this version.
     let existing = vault
@@ -151,30 +163,43 @@ pub fn extract_text(
         }));
     }
 
-    let dek = vault.dek()?;
-    let original = vault.blobs().get(dek, &BlobHash(original_hash))?;
-    let text = run_extractor(extractor, &original)?;
+    let (text, transcript_turns) = match parsed_transcript {
+        Some(parsed) => (parsed.text, parsed.turns),
+        None => (run_extractor(extractor, &original)?, Vec::new()),
+    };
 
     let derived_hash = vault.blobs().put(dek, text.as_bytes())?;
     let id = format!("dtx_{}", ulid::Ulid::new());
     let now = chrono::Utc::now().to_rfc3339();
-    vault.conn().execute(
-        "INSERT INTO derived_text (id, artifact_version_id, blob_hash, extractor, extractor_version, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![id, version_id, derived_hash.0, extractor, extractor_version, now],
-    )?;
-    vault.conn().execute(
-        "INSERT INTO provenance (id, derived_blob_hash, source_artifact_version_id, tool, tool_version, locality, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'local', ?6)",
-        rusqlite::params![
-            format!("prov_{}", ulid::Ulid::new()),
-            derived_hash.0,
-            version_id,
-            extractor,
-            extractor_version,
-            now
-        ],
-    )?;
+    vault.conn().execute_batch("BEGIN IMMEDIATE")?;
+    let persisted = (|| -> Result<(), ExtractError> {
+        vault.conn().execute(
+            "INSERT INTO derived_text (id, artifact_version_id, blob_hash, extractor, extractor_version, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, version_id, derived_hash.0, extractor, extractor_version, now],
+        )?;
+        vault.conn().execute(
+            "INSERT INTO provenance (id, derived_blob_hash, source_artifact_version_id, tool, tool_version, locality, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'local', ?6)",
+            rusqlite::params![
+                format!("prov_{}", ulid::Ulid::new()),
+                derived_hash.0,
+                version_id,
+                extractor,
+                extractor_version,
+                now
+            ],
+        )?;
+        crate::transcript::persist_turns(vault, &id, &transcript_turns)?;
+        Ok(())
+    })();
+    match persisted {
+        Ok(()) => vault.conn().execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = vault.conn().execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
 
     Ok(Some(DerivedText {
         id,

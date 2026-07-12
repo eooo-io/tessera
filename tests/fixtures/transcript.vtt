@@ -1,0 +1,8 @@
+WEBVTT
+
+opening
+00:00:01.000 --> 00:00:03.500
+<v Alice>We should preserve the source timestamp.</v>
+
+00:00:04.000 --> 00:00:06.250
+Bob: And keep the speaker turn intact.
