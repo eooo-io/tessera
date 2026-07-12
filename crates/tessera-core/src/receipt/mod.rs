@@ -160,12 +160,34 @@ pub struct ArtifactAccess {
 }
 
 /// A single query within a session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryOutcome {
+    #[default]
+    Legacy,
+    Results,
+    NoResult,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryRecord {
     pub query_id: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub query_text: String,
     pub artifacts_accessed: Vec<ArtifactAccess>,
+    #[serde(default)]
+    pub outcome: QueryOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relevance_threshold: Option<f32>,
+    #[serde(default)]
+    pub candidates_considered: u32,
+    #[serde(default)]
+    pub rejected_below_threshold: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_candidate_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
 }
 
 /// A recorded rate-limit rejection.
@@ -517,7 +539,34 @@ impl<'v> Session<'v> {
         text: &str,
         top_k: usize,
     ) -> Result<Vec<RenderedContext>, ReceiptError> {
-        let hits = search::search_with_lens(self.vault, embedder, &self.lens, text, top_k)?;
+        let evaluated =
+            match search::search_with_lens_evaluated(self.vault, embedder, &self.lens, text, top_k)
+            {
+                Ok(evaluated) => evaluated,
+                Err(error) => {
+                    let failure_kind = match &error {
+                        SearchError::UncalibratedModel(_) => "uncalibrated_model",
+                        SearchError::Embed(_) => "embedding_error",
+                        SearchError::Index(_) => "index_error",
+                        SearchError::Vault(_) => "vault_error",
+                        SearchError::Database(_) => "database_error",
+                    };
+                    self.receipt.queries.push(QueryRecord {
+                        query_id: format!("qry_{}", ulid::Ulid::new()),
+                        timestamp: chrono::Utc::now(),
+                        query_text: text.to_owned(),
+                        artifacts_accessed: Vec::new(),
+                        outcome: QueryOutcome::Failed,
+                        relevance_threshold: None,
+                        candidates_considered: 0,
+                        rejected_below_threshold: 0,
+                        best_candidate_score: None,
+                        failure_kind: Some(failure_kind.to_owned()),
+                    });
+                    return Err(error.into());
+                }
+            };
+        let hits = evaluated.results;
         let mut rendered = Vec::with_capacity(hits.len());
         let mut accesses = Vec::with_capacity(hits.len());
         for hit in &hits {
@@ -552,6 +601,16 @@ impl<'v> Session<'v> {
             timestamp: chrono::Utc::now(),
             query_text: text.to_owned(),
             artifacts_accessed: accesses,
+            outcome: if hits.is_empty() {
+                QueryOutcome::NoResult
+            } else {
+                QueryOutcome::Results
+            },
+            relevance_threshold: Some(evaluated.diagnostics.relevance_threshold),
+            candidates_considered: evaluated.diagnostics.candidates_considered,
+            rejected_below_threshold: evaluated.diagnostics.rejected_below_threshold,
+            best_candidate_score: evaluated.diagnostics.best_candidate_score,
+            failure_kind: None,
         });
         Ok(rendered)
     }
@@ -574,6 +633,12 @@ impl<'v> Session<'v> {
                 self.allow_full,
                 None,
             )?],
+            outcome: QueryOutcome::Results,
+            relevance_threshold: None,
+            candidates_considered: 0,
+            rejected_below_threshold: 0,
+            best_candidate_score: None,
+            failure_kind: None,
         });
         Ok(rc)
     }
@@ -1287,6 +1352,25 @@ mod tests {
         fn dimensions(&self) -> usize {
             384
         }
+        fn calibrated_relevance_floor(&self) -> Option<f32> {
+            Some(0.0)
+        }
+    }
+
+    struct UncalibratedEmbedder;
+    impl EmbeddingProvider for UncalibratedEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            FakeEmbedder.embed(text)
+        }
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            FakeEmbedder.embed_batch(texts)
+        }
+        fn model_version(&self) -> &str {
+            "uncalibrated@1"
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
     }
 
     fn ingest_live(vault: &Vault, space: &SpaceId, dir: &Path, name: &str, body: &str) {
@@ -1379,6 +1463,62 @@ mod tests {
         assert!(receipts_dir(&vault)
             .join(format!("{}.json", receipt.receipt_id))
             .exists());
+    }
+
+    #[test]
+    fn empty_and_failed_queries_are_distinct_zero_disclosure_receipts() {
+        let (_dir, vault, mut lens) = recorded_vault();
+        lens.min_relevance_score = Some(1.0);
+        let mut empty = Session::open(
+            &vault,
+            AgentRef {
+                agent_id: "agent-empty".into(),
+                name: "Empty".into(),
+            },
+            &lens,
+            "empty query",
+            false,
+        )
+        .expect("open empty");
+        let results = empty
+            .query(&FakeEmbedder, "quantum orbital spectroscopy", 5)
+            .expect("empty query succeeds");
+        assert!(results.is_empty());
+        let empty_receipt = empty.finalize().expect("finalize empty");
+        let empty_query = &empty_receipt.queries[0];
+        assert_eq!(empty_query.outcome, QueryOutcome::NoResult);
+        assert!(empty_query.artifacts_accessed.is_empty());
+        assert_eq!(empty_receipt.summary.total_bytes_disclosed, 0);
+        assert_eq!(empty_query.relevance_threshold, Some(1.0));
+        assert!(empty_query.rejected_below_threshold > 0);
+
+        let mut failed = Session::open(
+            &vault,
+            AgentRef {
+                agent_id: "agent-failed".into(),
+                name: "Failed".into(),
+            },
+            &lens,
+            "failed query",
+            false,
+        )
+        .expect("open failed");
+        let error = failed
+            .query(&UncalibratedEmbedder, "anything", 5)
+            .expect_err("uncalibrated model must fail");
+        assert!(matches!(
+            error,
+            ReceiptError::Search(SearchError::UncalibratedModel(_))
+        ));
+        let failed_receipt = failed.finalize().expect("finalize failed");
+        let failed_query = &failed_receipt.queries[0];
+        assert_eq!(failed_query.outcome, QueryOutcome::Failed);
+        assert_eq!(
+            failed_query.failure_kind.as_deref(),
+            Some("uncalibrated_model")
+        );
+        assert!(failed_query.artifacts_accessed.is_empty());
+        assert_eq!(failed_receipt.summary.total_bytes_disclosed, 0);
     }
 
     #[test]

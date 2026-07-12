@@ -7,6 +7,10 @@ use super::{mean_pool_normalize, EmbedError, EmbeddingProvider};
 pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 pub const MODEL_VERSION: &str = "all-MiniLM-L6-v2@onnx-1";
 pub const DIMENSIONS: usize = 384;
+/// Conservative v1 floor: separates every unrelated sanitized calibration
+/// pair while preserving all relevant pairs. Hard semantic negatives remain a
+/// documented limitation for #42/#43 rather than being mislabeled as truth.
+pub const CALIBRATED_RELEVANCE_FLOOR: f32 = 0.20;
 const MAX_TOKENS: usize = 256;
 
 /// Files expected in the model directory, with their download sources.
@@ -125,6 +129,10 @@ impl EmbeddingProvider for OnnxEmbedder {
 
     fn dimensions(&self) -> usize {
         DIMENSIONS
+    }
+
+    fn calibrated_relevance_floor(&self) -> Option<f32> {
+        Some(CALIBRATED_RELEVANCE_FLOOR)
     }
 }
 

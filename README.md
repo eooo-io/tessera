@@ -77,6 +77,27 @@ failed, or empty processing results unless the owner also passes
 `--allow-incomplete`. That override is deliberately loud; a filename is not a
 content review, no matter how confident the flag looks.
 
+## Relevance minimization
+
+Semantic queries use cosine similarity over normalized MiniLM vectors and
+apply the calibrated floor for the exact embedding model before any content is
+rendered or counted as disclosed. The current
+`all-MiniLM-L6-v2@onnx-1` floor is `0.20`. An unknown model/version fails closed
+until it is calibrated; it does not inherit another model's number by vibes.
+
+A lens may set `min_relevance_score` to a stricter value. The effective floor
+is `max(model floor, lens floor)`, so an agent cannot weaken the system default.
+Empty semantic results print `No results.` and receipts record the threshold,
+candidate/rejection counts, best candidate score, and whether the outcome was
+`results`, `no_result`, or `failed`. Rejected candidates are never recorded as
+accessed artifacts. Direct `vault_get_item` access is policy-checked but is not
+a semantic query and has no relevance threshold.
+
+The floor reduces accidental low-relevance disclosure. It does **not** prove
+that a returned passage is true or answers the question. Calibration method,
+tradeoffs, and limitations are recorded in
+[`docs/evidence/relevance-floor-calibration.md`](docs/evidence/relevance-floor-calibration.md).
+
 ## Project Structure
 
 ```
