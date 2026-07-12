@@ -85,6 +85,10 @@ cross-host provisioning, fixed v1 dimensions, and resumable shadow reindexing
 are documented in
 [`docs/model-supply-chain.md`](docs/model-supply-chain.md).
 
+Integrity classifications, consistency-barrier backup, restore verification,
+and the no-fabricated-repair boundary are documented in
+[`docs/recovery-runbook.md`](docs/recovery-runbook.md).
+
 ## Quarantine review
 
 Ingested artifacts remain `pending` and unreachable through every lens until

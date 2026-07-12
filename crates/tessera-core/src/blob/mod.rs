@@ -5,6 +5,7 @@
 //! 24-byte random nonce || ciphertext+tag, AAD = the blob's hash.
 //! See `spec/vault-format.md` §5.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{Aead, Payload};
@@ -74,9 +75,22 @@ impl BlobStore {
         container.extend_from_slice(&sealed);
 
         std::fs::create_dir_all(path.parent().expect("sharded path has parent"))?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &container)?;
-        std::fs::rename(&tmp, &path)?;
+        let tmp = path.with_extension(format!("tmp.{}", ulid::Ulid::new()));
+        let write_result = (|| -> Result<(), std::io::Error> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(&container)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &path)?;
+            std::fs::File::open(path.parent().expect("sharded path has parent"))?.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(hash)
     }
 
@@ -163,6 +177,29 @@ mod tests {
         let hash = store.put(&dek, b"the quick brown fox").expect("put");
         let plain = store.get(&dek, &hash).expect("get");
         assert_eq!(plain, b"the quick brown fox");
+    }
+
+    #[test]
+    fn crash_residue_from_encrypt_is_replaced_only_by_authenticated_complete_blob() {
+        let (_dir, store) = store();
+        let dek = test_dek();
+        let plaintext = b"complete source after interrupted encryption";
+        let expected = BlobHash(blake3::hash(plaintext).to_hex().to_string());
+        let final_path = store.path_for(&expected);
+        std::fs::create_dir_all(final_path.parent().expect("shard")).expect("shard");
+        let temporary = final_path.with_extension("tmp.crash-residue");
+        std::fs::write(&temporary, b"truncated ciphertext crash residue").expect("fault injection");
+
+        let actual = store.put(&dek, plaintext).expect("retry put");
+        assert_eq!(actual, expected);
+        assert!(
+            temporary.exists(),
+            "untrusted crash residue is not silently deleted"
+        );
+        assert_eq!(
+            store.get(&dek, &actual).expect("authenticated get"),
+            plaintext
+        );
     }
 
     #[test]

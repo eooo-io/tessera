@@ -555,3 +555,53 @@ fn wrong_passphrase_fails_cleanly() {
         .failure()
         .stderr(predicate::str::contains("incorrect passphrase"));
 }
+
+#[test]
+fn integrity_backup_restore_and_repair_confirmation_are_owner_visible() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("V.tessera");
+    let backup = dir.path().join("Backup.tessera");
+    tessera(&vault).args(["init"]).assert().success();
+
+    let diagnostic = tessera(&vault)
+        .args(["diag", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&diagnostic).expect("diagnostic JSON");
+    assert_eq!(report["schema"], "tessera.integrity-report.v1");
+    assert!(!String::from_utf8(diagnostic)
+        .unwrap()
+        .contains("test-passphrase"));
+
+    tessera(&vault)
+        .arg("backup")
+        .arg(&backup)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Backup verified"));
+    tessera(&backup)
+        .args(["diag", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tessera.integrity-report.v1"));
+    tessera(&vault)
+        .arg("backup")
+        .arg(&backup)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+
+    tessera(&vault)
+        .args(["repair-derived"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("without --yes"));
+    tessera(&vault)
+        .args(["repair-derived", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Derived rebuild complete"));
+}

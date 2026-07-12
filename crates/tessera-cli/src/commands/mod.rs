@@ -122,6 +122,20 @@ pub enum Command {
         /// Print the provenance chain for one artifact
         #[arg(long)]
         artifact: Option<String>,
+        /// Emit the versioned, content-free integrity report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create and verify a consistency-barrier portable vault backup
+    Backup {
+        /// New .tessera bundle path; must not already exist
+        destination: std::path::PathBuf,
+    },
+    /// Rebuild only derived text/chunks/summaries from authenticated originals
+    RepairDerived {
+        /// Confirm artifacts will return to pending and require review/reindex
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1492,18 +1506,28 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Diag { artifact } => {
-            println!("tessera v{}", env!("CARGO_PKG_VERSION"));
-            println!(
-                "pandoc: {}",
-                if tessera_core::extract::pandoc_available() {
-                    "available"
-                } else {
-                    "missing (DOCX extraction disabled)"
-                }
-            );
+        Command::Diag { artifact, json } => {
+            if !json {
+                println!("tessera v{}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "pandoc: {}",
+                    if tessera_core::extract::pandoc_available() {
+                        "available"
+                    } else {
+                        "missing (DOCX extraction disabled)"
+                    }
+                );
+            }
             match Vault::open(&vault_path, &passphrase()?) {
                 Ok(vault) => {
+                    let report = tessera_core::recovery::diagnose(&vault)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                        if report.has_fatal() {
+                            bail!("fatal vault integrity failure");
+                        }
+                        return Ok(());
+                    }
                     println!("vault: {}", vault.path().display());
                     println!("format_version: {}", vault.manifest().format_version);
                     println!("spaces: {}", space::list(&vault)?.len());
@@ -1516,6 +1540,12 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                             format!("⚠ {} orphaned derivation(s)", orphans.len())
                         }
                     );
+                    for check in &report.checks {
+                        println!(
+                            "integrity.{}: {:?} (affected: {}) — {}",
+                            check.component, check.class, check.affected, check.action
+                        );
+                    }
                     if let Some(id) = artifact {
                         let artifact_id = tessera_core::ArtifactId(id);
                         println!("provenance chain:");
@@ -1529,9 +1559,51 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                             );
                         }
                     }
+                    if report.has_fatal() {
+                        bail!("fatal vault integrity failure");
+                    }
                 }
-                Err(e) => println!("vault: unavailable ({e})"),
+                Err(e) => bail!("vault unavailable or partial: {e}"),
             }
+            Ok(())
+        }
+        Command::Backup { destination } => {
+            let secret = passphrase()?;
+            let vault = Vault::open(&vault_path, &secret)?;
+            let source_report = tessera_core::recovery::diagnose(&vault)?;
+            if source_report.has_fatal() {
+                bail!("source vault has fatal integrity failures; backup refused");
+            }
+            tessera_core::recovery::backup(&vault, &destination)?;
+            let restored = Vault::open(&destination, &secret)
+                .context("opening completed backup for restore verification")?;
+            let restored_report = tessera_core::recovery::diagnose(&restored)?;
+            if restored_report.has_fatal() {
+                bail!("backup copied but restore verification reported fatal integrity findings");
+            }
+            println!(
+                "Backup verified at {} (database, blobs, policies, sessions, and receipt chain)",
+                destination.display()
+            );
+            Ok(())
+        }
+        Command::RepairDerived { yes } => {
+            if !yes {
+                bail!(
+                    "refusing derived rebuild without --yes; live artifacts return to pending, old derived blobs are retained, and review plus model reindex are required"
+                );
+            }
+            let vault = Vault::open(&vault_path, &passphrase()?)?;
+            let report = tessera_core::recovery::rebuild_derived(&vault)?;
+            println!(
+                "Derived rebuild complete: pending={}, extracted={}, chunked={}, summarized={}, failed={}",
+                report.artifacts_moved_to_pending,
+                report.extracted,
+                report.chunked,
+                report.summarized,
+                report.failed
+            );
+            println!("Next: `tessera review`, then `tessera model reindex` after approval");
             Ok(())
         }
     }

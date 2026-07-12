@@ -12,14 +12,19 @@ env:
 
 jobs:
   check:
-    name: Check, Lint, Test
-    runs-on: macos-latest
+    name: Check, Lint, Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
+          toolchain: 1.97.0
           components: rustfmt, clippy
 
       - name: Cache cargo registry and build
@@ -36,6 +41,7 @@ jobs:
       # onnxruntime binary); newer Xcode toolchains don't expose it on the
       # default linker search path. Locate it and append its directory.
       - name: Locate clang runtime for ort-sys
+        if: runner.os == 'macOS'
         run: |
           lib=$(find "$(xcode-select -p)" /Library/Developer/CommandLineTools \
                 -name 'libclang_rt.osx.a' 2>/dev/null | head -1)

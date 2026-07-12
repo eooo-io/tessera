@@ -44,6 +44,16 @@ fn inbox_dir(vault: &Vault) -> PathBuf {
 
 /// Copy files into the vault's `inbox/` staging area.
 pub fn add(vault: &Vault, paths: &[PathBuf]) -> Result<Vec<PathBuf>, InboxError> {
+    add_with_copy(vault, paths, |source, destination| {
+        std::fs::copy(source, destination).map(|_| ())
+    })
+}
+
+fn add_with_copy(
+    vault: &Vault,
+    paths: &[PathBuf],
+    copy: impl Fn(&Path, &Path) -> Result<(), std::io::Error>,
+) -> Result<Vec<PathBuf>, InboxError> {
     let inbox = inbox_dir(vault);
     let mut staged = Vec::with_capacity(paths.len());
     for path in paths {
@@ -68,7 +78,21 @@ pub fn add(vault: &Vault, paths: &[PathBuf]) -> Result<Vec<PathBuf>, InboxError>
             target = inbox.join(format!("{stem}-{counter}{ext}"));
             counter += 1;
         }
-        std::fs::copy(path, &target)?;
+        let partial = inbox.join(format!(
+            ".{}.{}.partial",
+            target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("inbox"),
+            ulid::Ulid::new()
+        ));
+        if let Err(error) = copy(path, &partial) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error.into());
+        }
+        std::fs::File::open(&partial)?.sync_all()?;
+        std::fs::rename(&partial, &target)?;
+        std::fs::File::open(&inbox)?.sync_all()?;
         staged.push(target);
     }
     Ok(staged)
@@ -80,6 +104,13 @@ pub fn status(vault: &Vault) -> Result<Vec<PathBuf>, InboxError> {
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|e| e.path())
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with('.') && name.ends_with(".partial"))
+                .unwrap_or(false)
+        })
         .collect();
     entries.sort();
     Ok(entries)
@@ -139,14 +170,32 @@ fn intake_one(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unnamed".to_owned());
-    let artifact_id = artifact::register(
-        vault,
-        space,
-        &filename,
-        media_type_for(staged),
-        Sensitivity::default(),
-    )?;
-    artifact::record_version(vault, &artifact_id, &blob_hash, content.len() as u64)?;
+    vault
+        .conn()
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(ArtifactError::Database)?;
+    let registered = (|| -> Result<ArtifactId, InboxError> {
+        let artifact_id = artifact::register(
+            vault,
+            space,
+            &filename,
+            media_type_for(staged),
+            Sensitivity::default(),
+        )?;
+        artifact::record_version(vault, &artifact_id, &blob_hash, content.len() as u64)?;
+        vault
+            .conn()
+            .execute_batch("COMMIT")
+            .map_err(ArtifactError::Database)?;
+        Ok(artifact_id)
+    })();
+    let artifact_id = match registered {
+        Ok(artifact_id) => artifact_id,
+        Err(error) => {
+            let _ = vault.conn().execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    };
 
     std::fs::remove_file(staged)?;
     Ok(Some(artifact_id))
@@ -215,6 +264,61 @@ mod tests {
     }
 
     #[test]
+    fn simulated_disk_full_never_exposes_a_partial_staged_file() {
+        let (dir, vault, _space) = vault_with_space();
+        let src = stage_file(dir.path(), "large.md", b"complete owner source");
+        let result = add_with_copy(&vault, std::slice::from_ref(&src), |_, partial| {
+            std::fs::write(partial, b"truncated")?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "fault injection: disk full",
+            ))
+        });
+
+        assert!(result.is_err());
+        assert!(src.is_file(), "owner source must remain untouched");
+        assert!(status(&vault).expect("status").is_empty());
+        assert!(
+            std::fs::read_dir(vault.path().join("inbox"))
+                .expect("inbox")
+                .next()
+                .is_none(),
+            "temporary copy must be cleaned after a failed write"
+        );
+    }
+
+    #[test]
+    fn crash_left_partial_copy_is_never_processable() {
+        let (_dir, vault, space) = vault_with_space();
+        let abandoned = vault.path().join("inbox/.document.md.crash.partial");
+        std::fs::write(&abandoned, b"truncated crash residue").expect("fault injection");
+
+        assert!(status(&vault).expect("status").is_empty());
+        let report = process(&vault, &space).expect("process");
+        assert!(report.ingested.is_empty());
+        assert!(abandoned.exists(), "crash evidence is not silently deleted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_permission_failure_preserves_owner_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, vault, _space) = vault_with_space();
+        let src = stage_file(dir.path(), "permission.md", b"owner source");
+        let inbox = vault.path().join("inbox");
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o500))
+            .expect("make inbox read-only");
+        let result = add(&vault, std::slice::from_ref(&src));
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o700))
+            .expect("restore inbox permissions");
+
+        assert!(result.is_err());
+        assert!(src.is_file());
+        assert!(status(&vault).expect("status").is_empty());
+    }
+
+    #[test]
     fn process_ingests_encrypts_and_clears_staging() {
         let (dir, vault, space) = vault_with_space();
         let src = stage_file(dir.path(), "doc.md", b"# content to vault");
@@ -253,6 +357,35 @@ mod tests {
 
         // Staging cleared.
         assert!(status(&vault).expect("status").is_empty());
+    }
+
+    #[test]
+    fn registration_failure_rolls_back_identity_and_keeps_staged_source() {
+        let (dir, vault, _space) = vault_with_space();
+        let src = stage_file(dir.path(), "rollback.md", b"source survives rollback");
+        add(&vault, &[src]).expect("stage");
+
+        let report = process(&vault, &SpaceId("space_missing".into())).expect("report");
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(status(&vault).expect("status").len(), 1);
+        let artifacts: i64 = vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .expect("artifact count");
+        let versions: i64 = vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM artifact_versions", [], |row| {
+                row.get(0)
+            })
+            .expect("version count");
+        assert_eq!((artifacts, versions), (0, 0));
+        let integrity = crate::recovery::diagnose(&vault).expect("diagnose orphan");
+        let orphans = integrity
+            .checks
+            .iter()
+            .find(|item| item.component == "orphan_blobs")
+            .expect("orphan check");
+        assert_eq!(orphans.affected, 1);
     }
 
     #[test]
