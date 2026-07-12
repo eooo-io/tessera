@@ -103,7 +103,7 @@ Media matrix (v1):
 
 ## 5. Guardian (MCP server)
 
-- **Session = MCP connection bound to (lens, purpose, TTL).** stdio: the client's server config declares lens id + purpose; the owner authorizes the pairing once via CLI. HTTP: OAuth 2.1 per MCP 2026 authorization spec; scopes map to lens ids; incremental consent maps to lens switching.
+- **Session = MCP access bound to (agent, lens, purpose, TTL).** stdio: the client's server config presents an owner-approved pairing. HTTP: OAuth 2.1 per the latest published MCP revision (`2025-11-25` at implementation time); scopes map to lens ids and a new lens requires a separately approved remote pairing/new consent. Each stateless disclosing HTTP request persists a correlated live session and exact receipt.
 - **Tools exposed (gated by the session's lens):** `vault_query` (policy-filtered retrieval with citations), `vault_get_item` (single artifact at the lens's disclosure mode), `vault_list_spaces` (only spaces the lens includes, only if `allow_metadata`).
 - **Receipts:** opened at session start, appended per query (query text, artifacts touched, disclosure mode, bytes disclosed), finalized at session end or revocation. Each finalized receipt embeds the BLAKE3 hash of the previous receipt — a per-vault hash chain making the audit log tamper-evident. `tessera receipts verify` walks the chain.
 - **Revocation:** `tessera sessions revoke <id|--all>` takes effect on the next tool call (guardian checks session validity per call). Guardian holds the DEK in memory only while unlocked; `tessera guardian lock` zeroes it.

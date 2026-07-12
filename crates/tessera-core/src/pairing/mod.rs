@@ -37,6 +37,7 @@ pub struct Pairing {
     pub ttl_minutes: u32,
     pub approved_at: String,
     pub revoked_at: Option<String>,
+    pub oauth_client_id: Option<String>,
 }
 
 impl Pairing {
@@ -46,7 +47,8 @@ impl Pairing {
     }
 }
 
-const COLS: &str = "id, lens_id, purpose, agent_name, ttl_minutes, approved_at, revoked_at";
+const COLS: &str =
+    "id, lens_id, purpose, agent_name, ttl_minutes, approved_at, revoked_at, oauth_client_id";
 
 fn row_to_pairing(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pairing> {
     Ok(Pairing {
@@ -57,6 +59,7 @@ fn row_to_pairing(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pairing> {
         ttl_minutes: row.get::<_, i64>(4)? as u32,
         approved_at: row.get(5)?,
         revoked_at: row.get(6)?,
+        oauth_client_id: row.get(7)?,
     })
 }
 
@@ -69,6 +72,38 @@ pub fn approve(
     agent_name: &str,
     ttl_minutes: u32,
 ) -> Result<Pairing, PairingError> {
+    approve_with_client(vault, lens_id, purpose, agent_name, ttl_minutes, None)
+}
+
+/// Approve a remote pairing bound to one preregistered OAuth client.
+pub fn approve_remote(
+    vault: &Vault,
+    lens_id: &LensId,
+    purpose: &str,
+    agent_name: &str,
+    ttl_minutes: u32,
+    oauth_client_id: &str,
+) -> Result<Pairing, PairingError> {
+    let _ = crate::oauth::get_client(vault, oauth_client_id)
+        .map_err(|_| PairingError::NotFound(format!("OAuth client {oauth_client_id}")))?;
+    approve_with_client(
+        vault,
+        lens_id,
+        purpose,
+        agent_name,
+        ttl_minutes,
+        Some(oauth_client_id),
+    )
+}
+
+fn approve_with_client(
+    vault: &Vault,
+    lens_id: &LensId,
+    purpose: &str,
+    agent_name: &str,
+    ttl_minutes: u32,
+    oauth_client_id: Option<&str>,
+) -> Result<Pairing, PairingError> {
     // The lens must exist at approval time.
     lens::get(vault, lens_id).map_err(|e| match e {
         LensError::NotFound(id) => PairingError::UnknownLens(id),
@@ -78,9 +113,18 @@ pub fn approve(
     let id = format!("pair_{}", ulid::Ulid::new());
     let approved_at = chrono::Utc::now().to_rfc3339();
     vault.conn().execute(
-        "INSERT INTO pairings (id, lens_id, purpose, agent_name, ttl_minutes, approved_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![id, lens_id.0, purpose, agent_name, ttl_minutes, approved_at],
+        "INSERT INTO pairings
+           (id, lens_id, purpose, agent_name, ttl_minutes, approved_at, oauth_client_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            id,
+            lens_id.0,
+            purpose,
+            agent_name,
+            ttl_minutes,
+            approved_at,
+            oauth_client_id
+        ],
     )?;
     Ok(Pairing {
         id,
@@ -90,7 +134,31 @@ pub fn approve(
         ttl_minutes,
         approved_at,
         revoked_at: None,
+        oauth_client_id: oauth_client_id.map(str::to_owned),
     })
+}
+
+/// Resolve the single active owner approval for an OAuth client + lens scope.
+pub fn find_remote(
+    vault: &Vault,
+    oauth_client_id: &str,
+    lens_id: &str,
+) -> Result<Pairing, PairingError> {
+    let mut stmt = vault.conn().prepare(&format!(
+        "SELECT {COLS} FROM pairings
+         WHERE oauth_client_id = ?1 AND lens_id = ?2 AND revoked_at IS NULL
+         ORDER BY approved_at DESC"
+    ))?;
+    let matches = stmt
+        .query_map([oauth_client_id, lens_id], row_to_pairing)?
+        .collect::<Result<Vec<_>, _>>()?;
+    match matches.as_slice() {
+        [pairing] => Ok(pairing.clone()),
+        [] => Err(PairingError::NotFound(format!(
+            "remote approval for client {oauth_client_id} and lens {lens_id}"
+        ))),
+        _ => Err(PairingError::Database(rusqlite::Error::InvalidQuery)),
+    }
 }
 
 /// Fetch one pairing by id.

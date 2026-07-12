@@ -28,7 +28,7 @@ Tessera lets you curate what matters, then grant AI agents permission to access 
 | Crate | Type | Description |
 |-------|------|-------------|
 | `tessera-core` | Library | Vault storage, ingestion, chunking, embeddings, vector index, policy evaluation, disclosure rendering, receipts |
-| `tessera-guardian` | Binary | Localhost API daemon — agent registry, session tokens, purpose-bound access, query endpoint, SSE activity stream |
+| `tessera-guardian` | Binary | MCP guardian — stdio plus OAuth-protected Streamable HTTP, purpose/lens sessions, and exact receipts |
 | `tessera-cli` | Binary | Command-line interface for vault operations, evaluation harness, diagnostics |
 
 A **SwiftUI Mac app** (`mac/`) provides the desktop interface for spaces, lens building, agent grant dialogs, session monitoring, and receipt viewing.
@@ -60,6 +60,11 @@ cargo run -p tessera-cli -- --help
 # Run the guardian
 cargo run -p tessera-guardian
 ```
+
+Remote MCP uses the published `2025-11-25` Streamable HTTP/OAuth contract,
+binds loopback by default, and requires an owner pairing for the exact OAuth
+client and lens. Setup and TLS-boundary guidance are in
+[`docs/http-oauth.md`](docs/http-oauth.md).
 
 ## Quarantine review
 

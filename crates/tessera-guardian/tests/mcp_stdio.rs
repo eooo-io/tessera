@@ -76,7 +76,7 @@ fn initialize_handshake_succeeds_for_approved_pairing() {
     assert_eq!(resp["jsonrpc"], "2.0");
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["result"]["serverInfo"]["name"], "tessera-guardian");
-    assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(resp["result"]["protocolVersion"], "2025-11-25");
     assert!(
         resp["result"]["capabilities"]["tools"].is_object(),
         "advertises tools capability"

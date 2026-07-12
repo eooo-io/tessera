@@ -2531,6 +2531,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2752,11 +2763,13 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "axum-extra",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "jsonwebtoken",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tessera-core",
  "tokio",
@@ -2767,6 +2780,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "url",
 ]
 
 [[package]]
@@ -3229,6 +3243,18 @@ dependencies = [
  "http",
  "httparse",
  "log",
+]
+
+[[package]]
+name = "url"
+version = "2.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+dependencies = [
+ "form_urlencoded",
+ "idna",
+ "percent-encoding",
+ "serde",
 ]
 
 [[package]]
