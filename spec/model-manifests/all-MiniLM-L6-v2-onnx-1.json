@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "model_name": "all-MiniLM-L6-v2",
+  "model_version": "all-MiniLM-L6-v2@onnx-1",
+  "source_repository": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+  "revision": "5641a7880f40ebf4035d05e60c5f9b7a9c272c84",
+  "license": "Apache-2.0",
+  "dimensions": 384,
+  "max_tokens": 256,
+  "tokenizer_version": "tokenizer.json@sha256:be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
+  "runtime_versions": "ort 2.0.0-rc.12; tokenizers 0.21; sqlite-vec 0.1",
+  "provenance": "Published by sentence-transformers on Hugging Face Hub; pinned to the immutable upstream revision and independently bound here by repository-reviewed SHA-256 digests.",
+  "files": [
+    {
+      "path": "model.onnx",
+      "source_path": "onnx/model.onnx",
+      "sha256": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
+      "size": 90405214
+    },
+    {
+      "path": "tokenizer.json",
+      "source_path": "tokenizer.json",
+      "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
+      "size": 466247
+    }
+  ]
+}

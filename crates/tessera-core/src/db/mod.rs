@@ -85,6 +85,8 @@ mod tests {
             "oauth_authorization_codes",
             "oauth_access_tokens",
             "guardian_lock_state",
+            "reindex_state",
+            "reindex_embeddings_map",
         ] {
             let count: i64 = conn
                 .query_row(

@@ -35,6 +35,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0014_guardian_lock_generation",
         include_str!("0014_guardian_lock_generation.sql"),
     ),
+    ("0015_reindex_state", include_str!("0015_reindex_state.sql")),
 ];
 
 /// Number of migrations this build knows about.

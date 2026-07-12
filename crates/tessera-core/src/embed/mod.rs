@@ -1,8 +1,8 @@
 //! Embedding provider trait and implementations.
 //!
 //! Default: all-MiniLM-L6-v2 (384 dimensions) via ONNX Runtime. Model files
-//! are fetched by `tessera model fetch` (curl subprocess) into the model
-//! directory and pinned by BLAKE3 in `models.lock` on first fetch.
+//! are fetched or provisioned into the model directory and verified against
+//! Tessera's repository-controlled, immutable model manifest before loading.
 
 pub mod onnx;
 
@@ -18,8 +18,12 @@ pub enum EmbedError {
     Tokenization(String),
     #[error("inference failed: {0}")]
     InferenceFailed(String),
-    #[error("model files missing at {0} — run `tessera model fetch`")]
+    #[error(
+        "model files missing at {0} — run `tessera model fetch` (online) or `tessera model install --source DIR` (offline)"
+    )]
     ModelMissing(String),
+    #[error("model verification failed: {0}")]
+    ModelVerification(String),
 }
 
 /// Trait for embedding providers — allows swapping models without

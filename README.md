@@ -79,6 +79,12 @@ and no-echo prompt fallbacks remain portable. Idle/explicit lock behavior,
 keyslot recovery, and residual risks are documented in
 [`docs/guardian-unlock.md`](docs/guardian-unlock.md).
 
+Embedding assets are pinned by a repository-controlled manifest and verified
+before installation and again before runtime loading. Online fetch, offline
+cross-host provisioning, fixed v1 dimensions, and resumable shadow reindexing
+are documented in
+[`docs/model-supply-chain.md`](docs/model-supply-chain.md).
+
 ## Quarantine review
 
 Ingested artifacts remain `pending` and unreachable through every lens until
