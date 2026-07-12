@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tessera_core::receipt::Receipt;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -69,4 +70,62 @@ fn reference_clients_are_stdlib_only_and_request_v1() {
         assert!(source.contains("tessera.guardian.v1"));
         assert!(!source.contains("import requests"));
     }
+}
+
+#[test]
+fn portable_concurrent_receipt_chain_is_schema_valid_and_tamper_evident() {
+    let schema = json("spec/receipt.schema.json");
+    let validator = jsonschema::validator_for(&schema).expect("receipt schema");
+    let values = json("conformance/guardian-v1/receipts/chain.json");
+    let receipts: Vec<Receipt> = serde_json::from_value(values.clone()).expect("receipt chain");
+    assert_eq!(receipts.len(), 2);
+    for (seq, (value, receipt)) in values
+        .as_array()
+        .expect("array")
+        .iter()
+        .zip(receipts.iter())
+        .enumerate()
+    {
+        validator
+            .validate(value)
+            .unwrap_or_else(|e| panic!("receipt {seq}: {e}"));
+        assert_eq!(receipt.seq, seq as u64);
+        let policy = &receipt
+            .effective_lens
+            .as_ref()
+            .expect("effective lens")
+            .policy;
+        let policy_hash = blake3::hash(&serde_json::to_vec(policy).expect("policy json"))
+            .to_hex()
+            .to_string();
+        assert_eq!(
+            receipt.effective_lens.as_ref().unwrap().policy_hash,
+            policy_hash
+        );
+        let mut canonical = receipt.clone();
+        canonical.self_hash = None;
+        let self_hash = blake3::hash(&serde_json::to_vec(&canonical).expect("receipt json"))
+            .to_hex()
+            .to_string();
+        assert_eq!(receipt.self_hash.as_deref(), Some(self_hash.as_str()));
+        let expected_prev = seq
+            .checked_sub(1)
+            .and_then(|prior| receipts[prior].self_hash.as_deref());
+        assert_eq!(receipt.prev_receipt_hash.as_deref(), expected_prev);
+    }
+
+    let concurrent = json("conformance/guardian-v1/golden/concurrent-sessions.json");
+    assert_eq!(concurrent["sessions"][0]["lens_id"], "lens_SYNTHETIC_A");
+    assert_eq!(concurrent["sessions"][1]["lens_id"], "lens_SYNTHETIC_B");
+    assert_eq!(receipts[0].session_id, "sess_SYNTHETIC_B");
+    assert_eq!(receipts[1].session_id, "sess_SYNTHETIC_A");
+    assert_eq!(concurrent["invariants"]["cross_lens_disclosure"], false);
+
+    let mut tampered = receipts[0].clone();
+    tampered.purpose.push_str(" altered");
+    let stored = tampered.self_hash.take().expect("stored hash");
+    let recomputed = blake3::hash(&serde_json::to_vec(&tampered).expect("tampered json"))
+        .to_hex()
+        .to_string();
+    assert_ne!(stored, recomputed, "editing a receipt must change its hash");
 }

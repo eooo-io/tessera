@@ -1,0 +1,27 @@
+{
+  "contractVersion": "tessera.guardian.v1",
+  "sessions": [
+    {
+      "session_id": "sess_SYNTHETIC_A",
+      "pairing_id": "pair_SYNTHETIC_A",
+      "lens_id": "lens_SYNTHETIC_A",
+      "started_order": 1,
+      "finalized_order": 2,
+      "receipt_id": "rcpt_SYNTHETIC_A"
+    },
+    {
+      "session_id": "sess_SYNTHETIC_B",
+      "pairing_id": "pair_SYNTHETIC_B",
+      "lens_id": "lens_SYNTHETIC_B",
+      "started_order": 2,
+      "finalized_order": 1,
+      "receipt_id": "rcpt_SYNTHETIC_B"
+    }
+  ],
+  "invariants": {
+    "distinct_pairings": true,
+    "distinct_lenses": true,
+    "cross_lens_disclosure": false,
+    "receipt_chain_uses_finalization_order": true
+  }
+}

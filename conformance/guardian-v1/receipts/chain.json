@@ -1,0 +1,55 @@
+[
+  {
+    "schema_version": 2,
+    "receipt_id": "rcpt_SYNTHETIC_B",
+    "session_id": "sess_SYNTHETIC_B",
+    "pairing_id": "pair_SYNTHETIC_B",
+    "agent": { "agent_id": "agent-synthetic-b", "name": "Synthetic B" },
+    "lens": { "lens_id": "lens_SYNTHETIC_B", "name": "synthetic-b" },
+    "effective_lens": {
+      "policy": {
+        "id": "lens_SYNTHETIC_B", "name": "synthetic-b",
+        "space_ids": ["space_SYNTHETIC_B"], "space_exclude_ids": [],
+        "tag_include": [], "tag_exclude": [], "content_types": [], "media_types": [],
+        "disclosure_mode": "summary", "allow_metadata": true,
+        "operations": ["answer"], "sensitivity_ceiling": "internal",
+        "approval_rule": "on_sensitive", "default_ttl_minutes": 60,
+        "created_at": "2026-01-01T00:00:01Z", "updated_at": "2026-01-01T00:00:01Z"
+      },
+      "policy_hash": "62fc717febc2a41c396f3eda33528e58bc2e5f5378c59528ba0b4d4361b70daa"
+    },
+    "purpose": "synthetic concurrent isolation B",
+    "started_at": "2026-01-01T00:00:01Z", "ended_at": "2026-01-01T00:00:02Z",
+    "queries": [],
+    "summary": { "total_queries": 0, "unique_artifacts_accessed": 0, "total_bytes_disclosed": 0, "disclosure_modes_used": [] },
+    "rate_limit_events": [], "seq": 0, "prev_receipt_hash": null,
+    "self_hash": "7f34cc0a93569a355b10cc2aa1067793eead5c1c2fd7a0e9c4feb90dcc0a3e03"
+  },
+  {
+    "schema_version": 2,
+    "receipt_id": "rcpt_SYNTHETIC_A",
+    "session_id": "sess_SYNTHETIC_A",
+    "pairing_id": "pair_SYNTHETIC_A",
+    "agent": { "agent_id": "agent-synthetic-a", "name": "Synthetic A" },
+    "lens": { "lens_id": "lens_SYNTHETIC_A", "name": "synthetic-a" },
+    "effective_lens": {
+      "policy": {
+        "id": "lens_SYNTHETIC_A", "name": "synthetic-a",
+        "space_ids": ["space_SYNTHETIC_A"], "space_exclude_ids": [],
+        "tag_include": [], "tag_exclude": [], "content_types": [], "media_types": [],
+        "disclosure_mode": "excerpt", "max_quote_chars": 256, "allow_metadata": true,
+        "operations": ["answer"], "sensitivity_ceiling": "confidential",
+        "approval_rule": "always", "default_ttl_minutes": 30,
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+      },
+      "policy_hash": "eeac072438c668b2f817fc93f970d1461bb615fc0d60f4917a9d82d090873d73"
+    },
+    "purpose": "synthetic concurrent isolation A",
+    "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:03Z",
+    "queries": [],
+    "summary": { "total_queries": 0, "unique_artifacts_accessed": 0, "total_bytes_disclosed": 0, "disclosure_modes_used": [] },
+    "rate_limit_events": [], "seq": 1,
+    "prev_receipt_hash": "7f34cc0a93569a355b10cc2aa1067793eead5c1c2fd7a0e9c4feb90dcc0a3e03",
+    "self_hash": "a8a9e7b82d3b77115c31ab79318ffaed7c2f0928fee09066e2b32fd768fbee8f"
+  }
+]
