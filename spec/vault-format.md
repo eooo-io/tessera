@@ -93,8 +93,11 @@ Migration 0005 adds vector storage: `chunk_embeddings` (a sqlite-vec `vec0`
 virtual table, `float[384]`; readers MUST register the sqlite-vec extension
 before opening) and `embeddings_map` (chunk ↔ vec rowid, producing model
 version — mixed model versions in one vault are refused at query time).
-Later milestones append lenses, sessions, and the receipts index. The
-database never contains plaintext artifact content.
+Migrations 0006–0009 append lenses, summaries, pairings, and live sessions.
+Migration 0010 adds `receipt_chain_state` (the singleton next-sequence/head)
+and `receipts_index` (unique receipt id and sequence, predecessor/self hashes,
+and final filename). The database never contains plaintext artifact content or
+receipt JSON.
 
 ## 4. `keyslot.bin`
 
@@ -179,6 +182,31 @@ disclosed-content hashes from the unlocked vault. Receipts without a
 `schema_version` are legacy v1 records: they remain readable and their original
 hash chain remains verifiable, but they cannot be upgraded into exact-disclosure
 evidence because the missing source coordinates were never recorded.
+
+### Concurrent finalization and crash boundary
+
+Opening a receipt session does not reserve a chain position. Finalization uses
+a brief SQLite `BEGIN IMMEDIATE` transaction to read and validate the durable
+head, assign `seq` and `prev_receipt_hash`, and uniquely commit the receipt
+index plus the next head. Agent session activity is never held under that
+write lock.
+
+The portable JSON file uses a recoverable two-phase boundary because SQLite
+cannot transact a filesystem rename:
+
+1. while holding the finalization transaction, write and `fsync` the complete
+   receipt to `receipts/.<receipt_id>.prepared`;
+2. commit the unique index and chain head;
+3. atomically rename the prepared file to `<receipt_id>.json` and `fsync` the
+   receipts directory.
+
+An interruption before step 2 rolls back the database and exposes no JSON
+receipt. An interruption after step 2 leaves a committed index and prepared
+file; the next list, load, verify, or finalization completes the deterministic
+rename before proceeding. A committed index with neither prepared nor final
+file, duplicate id/sequence, inconsistent filename, or disagreement among the
+head, index, and file chain fails closed. Existing pre-0010 file chains are
+backfilled only after the entire chain verifies.
 
 ## 7. `inbox/`
 

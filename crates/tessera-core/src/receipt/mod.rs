@@ -8,6 +8,7 @@
 //! receipt; [`verify`] walks the chain and fails if any receipt was edited.
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use thiserror::Error;
 
 use crate::artifact::ArtifactId;
@@ -36,6 +37,8 @@ pub enum ReceiptError {
     Vault(#[from] VaultError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("receipt finalization interrupted at {0}")]
+    FinalizationInterrupted(&'static str),
 }
 
 /// The agent a session acts for.
@@ -436,8 +439,9 @@ pub struct Session<'v> {
 }
 
 impl<'v> Session<'v> {
-    /// Open a session, chaining onto the current head of the vault's receipt
-    /// chain. `allow_full` decides whether a `full` lens is honored (else it
+    /// Open a session without reserving a receipt-chain position. The final
+    /// sequence and predecessor are assigned atomically at finalization.
+    /// `allow_full` decides whether a `full` lens is honored (else it
     /// fail-closes to excerpt in the disclosure renderer).
     pub fn open(
         vault: &'v Vault,
@@ -468,9 +472,6 @@ impl<'v> Session<'v> {
         allow_full: bool,
         binding: SessionBinding,
     ) -> Result<Self, ReceiptError> {
-        let chain = load_all_sorted(vault)?;
-        let seq = chain.len() as u64;
-        let prev_receipt_hash = chain.last().and_then(|r| r.self_hash.clone());
         let now = chrono::Utc::now();
         let policy_bytes = serde_json::to_vec(lens)?;
         let receipt = Receipt {
@@ -493,8 +494,10 @@ impl<'v> Session<'v> {
             queries: Vec::new(),
             summary: ReceiptSummary::default(),
             rate_limit_events: Vec::new(),
-            seq,
-            prev_receipt_hash,
+            // Placeholders only. `finalize_receipt` assigns both while holding
+            // SQLite's brief chain-head write lock.
+            seq: 0,
+            prev_receipt_hash: None,
             self_hash: None,
         };
         Ok(Self {
@@ -596,19 +599,278 @@ impl<'v> Session<'v> {
         !self.receipt.queries.is_empty() || !self.receipt.rate_limit_events.is_empty()
     }
 
-    /// Finalize: fill summary + `ended_at`, compute `self_hash`, and write
-    /// `receipts/<id>.json`. Returns the finalized receipt.
+    /// Finalize under the vault's serialized chain-head commit.
     pub fn finalize(mut self) -> Result<Receipt, ReceiptError> {
         self.receipt.ended_at = Some(chrono::Utc::now());
         self.receipt.summary = compute_summary(&self.receipt.queries);
-        self.receipt.self_hash = Some(content_hash(&self.receipt)?);
-
-        let dir = receipts_dir(self.vault);
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", self.receipt.receipt_id));
-        std::fs::write(&path, serde_json::to_vec_pretty(&self.receipt)?)?;
-        Ok(self.receipt)
+        finalize_receipt(self.vault, self.receipt, None)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizeFailpoint {
+    BeforeCommit,
+    AfterCommit,
+}
+
+fn prepared_path(vault: &Vault, receipt_id: &str) -> std::path::PathBuf {
+    receipts_dir(vault).join(format!(".{receipt_id}.prepared"))
+}
+
+fn final_path(vault: &Vault, receipt_id: &str) -> std::path::PathBuf {
+    receipts_dir(vault).join(format!("{receipt_id}.json"))
+}
+
+fn rollback(conn: &rusqlite::Connection) {
+    let _ = conn.execute_batch("ROLLBACK");
+}
+
+fn sync_dir(path: &std::path::Path) -> Result<(), ReceiptError> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+/// Complete the filesystem half of any receipt whose index/head transaction
+/// committed before the prepared file could be renamed into place.
+fn recover_committed_files(vault: &Vault) -> Result<(), ReceiptError> {
+    let dir = receipts_dir(vault);
+    std::fs::create_dir_all(&dir)?;
+    let mut stmt = vault
+        .conn()
+        .prepare("SELECT receipt_id, file_name FROM receipts_index ORDER BY seq")?;
+    let indexed = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (receipt_id, file_name) in indexed {
+        let expected_name = format!("{receipt_id}.json");
+        if file_name != expected_name {
+            return Err(ReceiptError::ChainBroken {
+                seq: 0,
+                reason: format!("unsafe or inconsistent indexed filename for {receipt_id}"),
+            });
+        }
+        let final_file = dir.join(file_name);
+        if final_file.exists() {
+            continue;
+        }
+        let prepared = prepared_path(vault, &receipt_id);
+        if !prepared.exists() {
+            return Err(ReceiptError::ChainBroken {
+                seq: 0,
+                reason: format!(
+                    "committed receipt {receipt_id} has neither final nor prepared file"
+                ),
+            });
+        }
+        if let Err(error) = std::fs::rename(&prepared, &final_file) {
+            // Another process may have completed the same deterministic
+            // recovery after our existence check.
+            if !final_file.exists() {
+                return Err(error.into());
+            }
+        }
+        sync_dir(&dir)?;
+    }
+    Ok(())
+}
+
+fn verify_chain_records(vault: &Vault, receipts: &[Receipt]) -> Result<(), ReceiptError> {
+    for (i, receipt) in receipts.iter().enumerate() {
+        if receipt.seq != i as u64 {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: format!("sequence gap: expected {i}, found {}", receipt.seq),
+            });
+        }
+        let stored = receipt
+            .self_hash
+            .as_ref()
+            .ok_or(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "missing self_hash (never finalized)".into(),
+            })?;
+        let recomputed = content_hash(receipt)?;
+        if &recomputed != stored {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "content hash mismatch — receipt was edited".into(),
+            });
+        }
+        let expected_prev = if i == 0 {
+            None
+        } else {
+            receipts[i - 1].self_hash.clone()
+        };
+        if receipt.prev_receipt_hash != expected_prev {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "prev-hash link does not match the previous receipt".into(),
+            });
+        }
+        verify_disclosures(vault, receipt)?;
+    }
+    Ok(())
+}
+
+/// Populate the durable index for a pre-0010 vault, but only after its file
+/// chain verifies. Re-check under `BEGIN IMMEDIATE` so concurrent openers
+/// cannot both backfill.
+fn ensure_receipt_index(vault: &Vault) -> Result<(), ReceiptError> {
+    let conn = vault.conn();
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<(), ReceiptError> {
+        let indexed: i64 =
+            conn.query_row("SELECT COUNT(*) FROM receipts_index", [], |row| row.get(0))?;
+        if indexed > 0 {
+            conn.execute_batch("COMMIT")?;
+            return Ok(());
+        }
+
+        let receipts = load_all_sorted(vault)?;
+        verify_chain_records(vault, &receipts)?;
+        for receipt in &receipts {
+            let self_hash =
+                receipt
+                    .self_hash
+                    .as_deref()
+                    .ok_or_else(|| ReceiptError::ChainBroken {
+                        seq: receipt.seq,
+                        reason: "legacy backfill found an unfinalized receipt".into(),
+                    })?;
+            conn.execute(
+                "INSERT INTO receipts_index
+                   (receipt_id, seq, prev_receipt_hash, self_hash, file_name, committed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    receipt.receipt_id,
+                    receipt.seq as i64,
+                    receipt.prev_receipt_hash,
+                    self_hash,
+                    format!("{}.json", receipt.receipt_id),
+                    receipt.ended_at.unwrap_or(receipt.started_at).to_rfc3339()
+                ],
+            )?;
+        }
+        let next_seq = receipts.len() as i64;
+        let head_hash = receipts
+            .last()
+            .and_then(|receipt| receipt.self_hash.as_deref());
+        conn.execute(
+            "UPDATE receipt_chain_state
+             SET next_seq = ?1, head_hash = ?2, updated_at = ?3
+             WHERE singleton = 1",
+            rusqlite::params![next_seq, head_hash, chrono::Utc::now().to_rfc3339()],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        rollback(conn);
+    }
+    result
+}
+
+fn finalize_receipt(
+    vault: &Vault,
+    mut receipt: Receipt,
+    failpoint: Option<FinalizeFailpoint>,
+) -> Result<Receipt, ReceiptError> {
+    recover_committed_files(vault)?;
+    ensure_receipt_index(vault)?;
+
+    let dir = receipts_dir(vault);
+    std::fs::create_dir_all(&dir)?;
+    let prepared = prepared_path(vault, &receipt.receipt_id);
+    let final_file = final_path(vault, &receipt.receipt_id);
+    if prepared.exists() || final_file.exists() {
+        return Err(ReceiptError::ChainBroken {
+            seq: receipt.seq,
+            reason: format!("duplicate receipt id {}", receipt.receipt_id),
+        });
+    }
+
+    let conn = vault.conn();
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let transaction_result = (|| -> Result<(), ReceiptError> {
+        let (next_seq, head_hash): (i64, Option<String>) = conn.query_row(
+            "SELECT next_seq, head_hash FROM receipt_chain_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (indexed_count, indexed_head): (i64, Option<String>) = conn.query_row(
+            "SELECT COUNT(*),
+                    (SELECT self_hash FROM receipts_index ORDER BY seq DESC LIMIT 1)
+             FROM receipts_index",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if next_seq != indexed_count || head_hash != indexed_head {
+            return Err(ReceiptError::ChainBroken {
+                seq: next_seq.max(0) as u64,
+                reason: "durable receipt chain head and index disagree".into(),
+            });
+        }
+        receipt.seq = next_seq as u64;
+        receipt.prev_receipt_hash = head_hash;
+        receipt.self_hash = Some(content_hash(&receipt)?);
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&prepared)?;
+        file.write_all(&serde_json::to_vec_pretty(&receipt)?)?;
+        file.sync_all()?;
+
+        if failpoint == Some(FinalizeFailpoint::BeforeCommit) {
+            return Err(ReceiptError::FinalizationInterrupted("before commit"));
+        }
+
+        let self_hash = receipt
+            .self_hash
+            .as_deref()
+            .ok_or_else(|| ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "finalization did not compute self hash".into(),
+            })?;
+        conn.execute(
+            "INSERT INTO receipts_index
+               (receipt_id, seq, prev_receipt_hash, self_hash, file_name, committed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                receipt.receipt_id,
+                receipt.seq as i64,
+                receipt.prev_receipt_hash,
+                self_hash,
+                format!("{}.json", receipt.receipt_id),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        conn.execute(
+            "UPDATE receipt_chain_state
+             SET next_seq = ?1, head_hash = ?2, updated_at = ?3
+             WHERE singleton = 1",
+            rusqlite::params![next_seq + 1, self_hash, chrono::Utc::now().to_rfc3339()],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+
+    if let Err(error) = transaction_result {
+        rollback(conn);
+        let _ = std::fs::remove_file(&prepared);
+        return Err(error);
+    }
+    if failpoint == Some(FinalizeFailpoint::AfterCommit) {
+        return Err(ReceiptError::FinalizationInterrupted("after commit"));
+    }
+
+    std::fs::rename(&prepared, &final_file)?;
+    sync_dir(&dir)?;
+    Ok(receipt)
 }
 
 /// All finalized receipts in the vault, sorted by sequence.
@@ -632,11 +894,15 @@ fn load_all_sorted(vault: &Vault) -> Result<Vec<Receipt>, ReceiptError> {
 
 /// List all finalized receipts, oldest first.
 pub fn list(vault: &Vault) -> Result<Vec<Receipt>, ReceiptError> {
+    recover_committed_files(vault)?;
+    ensure_receipt_index(vault)?;
     load_all_sorted(vault)
 }
 
 /// Load one receipt by id.
 pub fn load(vault: &Vault, receipt_id: &str) -> Result<Receipt, ReceiptError> {
+    recover_committed_files(vault)?;
+    ensure_receipt_index(vault)?;
     let path = receipts_dir(vault).join(format!("{receipt_id}.json"));
     if !path.exists() {
         return Err(ReceiptError::NotFound(receipt_id.to_owned()));
@@ -648,37 +914,60 @@ pub fn load(vault: &Vault, receipt_id: &str) -> Result<Receipt, ReceiptError> {
 /// number of receipts verified; any tamper (edited content, altered hash,
 /// broken link, missing/duplicated sequence) is a [`ReceiptError::ChainBroken`].
 pub fn verify(vault: &Vault) -> Result<usize, ReceiptError> {
+    recover_committed_files(vault)?;
+    ensure_receipt_index(vault)?;
     let receipts = load_all_sorted(vault)?;
-    for (i, r) in receipts.iter().enumerate() {
-        if r.seq != i as u64 {
+    verify_chain_records(vault, &receipts)?;
+
+    let mut stmt = vault.conn().prepare(
+        "SELECT receipt_id, seq, prev_receipt_hash, self_hash
+         FROM receipts_index ORDER BY seq",
+    )?;
+    let indexed = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if indexed.len() != receipts.len() {
+        return Err(ReceiptError::ChainBroken {
+            seq: receipts.len() as u64,
+            reason: format!(
+                "receipt directory/index count mismatch: files={}, index={}",
+                receipts.len(),
+                indexed.len()
+            ),
+        });
+    }
+    for (receipt, (id, seq, prev, self_hash)) in receipts.iter().zip(indexed) {
+        if receipt.receipt_id != id
+            || receipt.seq != seq
+            || receipt.prev_receipt_hash != prev
+            || receipt.self_hash.as_deref() != Some(self_hash.as_str())
+        {
             return Err(ReceiptError::ChainBroken {
-                seq: r.seq,
-                reason: format!("sequence gap: expected {i}, found {}", r.seq),
+                seq: receipt.seq,
+                reason: "receipt directory and durable index disagree".into(),
             });
         }
-        let stored = r.self_hash.as_ref().ok_or(ReceiptError::ChainBroken {
-            seq: r.seq,
-            reason: "missing self_hash (never finalized)".into(),
-        })?;
-        let recomputed = content_hash(r)?;
-        if &recomputed != stored {
-            return Err(ReceiptError::ChainBroken {
-                seq: r.seq,
-                reason: "content hash mismatch — receipt was edited".into(),
-            });
-        }
-        let expected_prev = if i == 0 {
-            None
-        } else {
-            receipts[i - 1].self_hash.clone()
-        };
-        if r.prev_receipt_hash != expected_prev {
-            return Err(ReceiptError::ChainBroken {
-                seq: r.seq,
-                reason: "prev-hash link does not match the previous receipt".into(),
-            });
-        }
-        verify_disclosures(vault, r)?;
+    }
+    let (next_seq, head_hash): (i64, Option<String>) = vault.conn().query_row(
+        "SELECT next_seq, head_hash FROM receipt_chain_state WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let expected_head = receipts
+        .last()
+        .and_then(|receipt| receipt.self_hash.clone());
+    if next_seq != receipts.len() as i64 || head_hash != expected_head {
+        return Err(ReceiptError::ChainBroken {
+            seq: next_seq.max(0) as u64,
+            reason: "durable receipt chain head does not match verified files".into(),
+        });
     }
     Ok(receipts.len())
 }
@@ -1048,6 +1337,18 @@ mod tests {
         }
     }
 
+    fn finalize_at(
+        session: Session<'_>,
+        failpoint: FinalizeFailpoint,
+    ) -> Result<Receipt, ReceiptError> {
+        let Session {
+            vault, mut receipt, ..
+        } = session;
+        receipt.ended_at = Some(chrono::Utc::now());
+        receipt.summary = compute_summary(&receipt.queries);
+        finalize_receipt(vault, receipt, Some(failpoint))
+    }
+
     #[test]
     fn session_records_every_query() {
         let (_dir, vault, lens) = recorded_vault();
@@ -1180,6 +1481,16 @@ mod tests {
             serde_json::to_vec_pretty(&legacy).expect("legacy json"),
         )
         .expect("write legacy receipt");
+        // Model a vault created before migration 0010: the valid file chain
+        // exists, but no durable receipt index has been populated yet.
+        vault
+            .conn()
+            .execute_batch(
+                "DELETE FROM receipts_index;
+                 UPDATE receipt_chain_state
+                 SET next_seq = 0, head_hash = NULL WHERE singleton = 1;",
+            )
+            .expect("clear index for legacy backfill");
         assert_eq!(verify(&vault).expect("v1 chain still verifies"), 1);
     }
 
@@ -1294,6 +1605,147 @@ mod tests {
         )
         .expect("restore");
         assert_eq!(verify(&vault).expect("restored"), 1);
+    }
+
+    #[test]
+    fn two_sessions_open_together_finalize_in_completion_order() {
+        let (_dir, vault, lens) = recorded_vault();
+        let first = Session::open(&vault, agent(), &lens, "opened first", false).expect("open 1");
+        let second = Session::open(&vault, agent(), &lens, "opened second", false).expect("open 2");
+
+        let completed_first = second.finalize().expect("finalize second opener");
+        let completed_second = first.finalize().expect("finalize first opener");
+        assert_eq!(completed_first.seq, 0);
+        assert_eq!(completed_second.seq, 1);
+        assert_eq!(
+            completed_second.prev_receipt_hash,
+            completed_first.self_hash
+        );
+        assert_eq!(verify(&vault).expect("chain"), 2);
+    }
+
+    #[test]
+    fn twenty_concurrent_finalizers_produce_one_contiguous_chain() {
+        use std::sync::{Arc, Barrier};
+
+        let (_dir, vault, lens) = recorded_vault();
+        let path = vault.path().to_path_buf();
+        drop(vault);
+        let barrier = Arc::new(Barrier::new(20));
+        let handles = (0..20)
+            .map(|index| {
+                let path = path.clone();
+                let lens = lens.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let vault = Vault::open(&path, "pass").expect("thread vault");
+                    let session =
+                        Session::open(&vault, agent(), &lens, format!("worker {index}"), false)
+                            .expect("thread session");
+                    barrier.wait();
+                    session.finalize().expect("thread finalize")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut finalized = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .collect::<Vec<_>>();
+        finalized.sort_by_key(|receipt| receipt.seq);
+        assert_eq!(
+            finalized
+                .iter()
+                .map(|receipt| receipt.seq)
+                .collect::<Vec<_>>(),
+            (0..20).collect::<Vec<_>>()
+        );
+        let vault = Vault::open(&path, "pass").expect("reopen");
+        assert_eq!(verify(&vault).expect("verify stress chain"), 20);
+    }
+
+    #[test]
+    fn interrupted_finalization_recovers_only_committed_receipts() {
+        let (_dir, vault, lens) = recorded_vault();
+
+        let before = Session::open(&vault, agent(), &lens, "before", false).expect("open");
+        assert!(matches!(
+            finalize_at(before, FinalizeFailpoint::BeforeCommit),
+            Err(ReceiptError::FinalizationInterrupted("before commit"))
+        ));
+        assert!(load_all_sorted(&vault).expect("files").is_empty());
+        let indexed: i64 = vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM receipts_index", [], |row| row.get(0))
+            .expect("index count");
+        assert_eq!(indexed, 0, "pre-commit failure is not visible");
+
+        let after = Session::open(&vault, agent(), &lens, "after", false).expect("open");
+        assert!(matches!(
+            finalize_at(after, FinalizeFailpoint::AfterCommit),
+            Err(ReceiptError::FinalizationInterrupted("after commit"))
+        ));
+        assert!(load_all_sorted(&vault).expect("not renamed yet").is_empty());
+        assert_eq!(
+            verify(&vault).expect("verification recovers committed file"),
+            1
+        );
+        assert_eq!(load_all_sorted(&vault).expect("recovered").len(), 1);
+    }
+
+    #[test]
+    fn duplicate_id_and_directory_index_disagreement_fail_closed() {
+        let (_dir, vault, lens) = recorded_vault();
+        let original = Session::open(&vault, agent(), &lens, "original", false)
+            .expect("open")
+            .finalize()
+            .expect("finalize");
+
+        let mut duplicate =
+            Session::open(&vault, agent(), &lens, "duplicate", false).expect("open duplicate");
+        duplicate.receipt.receipt_id = original.receipt_id.clone();
+        assert!(matches!(
+            duplicate.finalize(),
+            Err(ReceiptError::ChainBroken { .. })
+        ));
+        assert!(
+            vault
+                .conn()
+                .execute(
+                    "INSERT INTO receipts_index
+                       (receipt_id, seq, self_hash, file_name, committed_at)
+                     VALUES ('rcpt_other', 0, 'hash', 'rcpt_other.json', 'now')",
+                    [],
+                )
+                .is_err(),
+            "duplicate chain positions are rejected by the durable index"
+        );
+
+        vault
+            .conn()
+            .execute(
+                "UPDATE receipt_chain_state SET head_hash = 'forged' WHERE singleton = 1",
+                [],
+            )
+            .expect("corrupt head");
+        let blocked = Session::open(&vault, agent(), &lens, "blocked", false).expect("open");
+        assert!(matches!(
+            blocked.finalize(),
+            Err(ReceiptError::ChainBroken { .. })
+        ));
+        vault
+            .conn()
+            .execute(
+                "UPDATE receipt_chain_state SET next_seq = 1, head_hash = ?1 WHERE singleton = 1",
+                [original.self_hash.as_deref().expect("hash")],
+            )
+            .expect("restore head");
+
+        std::fs::remove_file(final_path(&vault, &original.receipt_id)).expect("remove final file");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::ChainBroken { .. })
+        ));
     }
 
     #[test]

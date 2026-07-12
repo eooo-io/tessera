@@ -21,6 +21,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0007_summaries", include_str!("0007_summaries.sql")),
     ("0008_pairings", include_str!("0008_pairings.sql")),
     ("0009_sessions", include_str!("0009_sessions.sql")),
+    ("0010_receipt_chain", include_str!("0010_receipt_chain.sql")),
 ];
 
 /// Number of migrations this build knows about.

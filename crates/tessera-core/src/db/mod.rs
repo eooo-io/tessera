@@ -78,6 +78,8 @@ mod tests {
             "tags",
             "artifact_tags",
             "provenance",
+            "receipt_chain_state",
+            "receipts_index",
         ] {
             let count: i64 = conn
                 .query_row(
