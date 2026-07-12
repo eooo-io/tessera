@@ -151,6 +151,71 @@ fn session_refused_for_revoked_pairing() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("revoked"));
 }
 
+fn assert_owner_change_blocks_next_call(
+    change: impl FnOnce(&Vault, &LensId, &str),
+    expected: &str,
+) {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "declared task", "local config", 60).expect("approve");
+    drop(vault);
+
+    let mut child = guardian(&path, &pairing.id).spawn().expect("spawn");
+    let mut input = child.stdin.take().expect("stdin");
+    let mut output = BufReader::new(child.stdout.take().expect("stdout"));
+    writeln!(
+        input,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+    )
+    .expect("initialize");
+    input.flush().expect("flush");
+    let mut line = String::new();
+    output.read_line(&mut line).expect("read initialize");
+
+    let vault = Vault::open(&path, "pass").expect("reopen");
+    change(&vault, &lens_id, &pairing.id);
+    drop(vault);
+
+    writeln!(
+        input,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"vault_list_spaces","arguments":{{}}}}}}"#
+    )
+    .expect("call");
+    input.flush().expect("flush");
+    line.clear();
+    output.read_line(&mut line).expect("read refusal");
+    let refusal: Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(refusal["result"]["isError"], true);
+    let message = refusal["result"]["content"][0]["text"]
+        .as_str()
+        .expect("message");
+    assert!(message.contains(expected), "unexpected refusal: {message}");
+
+    drop(input);
+    assert!(child.wait().expect("wait").success());
+}
+
+#[test]
+fn pairing_revocation_blocks_an_existing_stdio_session_on_next_call() {
+    assert_owner_change_blocks_next_call(
+        |vault, _lens, pairing_id| pairing::revoke(vault, pairing_id).expect("revoke"),
+        "pairing",
+    );
+}
+
+#[test]
+fn lens_change_makes_existing_stdio_credential_stale_on_next_call() {
+    assert_owner_change_blocks_next_call(
+        |vault, lens_id, _pairing_id| {
+            let mut policy = lens::get(vault, lens_id).expect("lens");
+            policy.allow_metadata = false;
+            lens::update(vault, &policy).expect("update");
+        },
+        "changed after pairing approval",
+    );
+}
+
 /// A vault with one live, summarized doc and a summary lens scoped to its
 /// space (with an optional per-session rate cap). Returns
 /// (tempdir, vault path, lens id, artifact id).
@@ -244,7 +309,7 @@ fn revoked_session_refuses_next_call_and_finalizes_receipt() {
     // A successful get_item records one access into the open receipt.
     writeln!(
         cin,
-        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"vault_get_item","arguments":{{"artifact_id":"{art}"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"vault_get_item","arguments":{{"artifact_id":"{art}","purpose":"different task","agent_name":"attacker","lens_id":"lens_OTHER","ttl_minutes":9999,"disclosure_mode":"full"}}}}}}"#,
         art = art.0
     )
     .unwrap();
@@ -301,6 +366,11 @@ fn revoked_session_refuses_next_call_and_finalizes_receipt() {
         Some(p.id.as_str()),
         "receipt must bind the owner-approved pairing"
     );
+    assert_eq!(finalized[0].purpose, p.purpose);
+    assert_eq!(finalized[0].agent.name, p.agent_name);
+    assert_eq!(finalized[0].lens.lens_id, p.lens_id);
+    assert_ne!(finalized[0].purpose, "different task");
+    assert_ne!(finalized[0].agent.name, "attacker");
 }
 
 #[test]

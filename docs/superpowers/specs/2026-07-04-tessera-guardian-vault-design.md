@@ -103,10 +103,10 @@ Media matrix (v1):
 
 ## 5. Guardian (MCP server)
 
-- **Session = MCP access bound to (agent, lens, purpose, TTL).** stdio: the client's server config presents an owner-approved pairing. HTTP: OAuth 2.1 per the latest published MCP revision (`2025-11-25` at implementation time); scopes map to lens ids and a new lens requires a separately approved remote pairing/new consent. Each stateless disclosing HTTP request persists a correlated live session and exact receipt.
+- **Session = MCP access bound to an immutable owner grant (agent label, exact lens revision, declared purpose, TTL).** Purpose is audit context, not semantic enforcement. Stdio identity is local pairing/configuration trust, not attestation. HTTP uses OAuth 2.1 per the latest published MCP revision (`2025-11-25` at implementation time); scopes map to lens ids and a changed/new lens requires a separately approved remote pairing/new consent. Each stateless disclosing HTTP request persists a correlated live session and exact receipt. See `docs/authorization-model.md` for reuse, identity, revocation, and downstream-retention limits.
 - **Tools exposed (gated by the session's lens):** `vault_query` (policy-filtered retrieval with citations), `vault_get_item` (single artifact at the lens's disclosure mode), `vault_list_spaces` (only spaces the lens includes, only if `allow_metadata`).
 - **Receipts:** opened at session start, appended per query (query text, artifacts touched, disclosure mode, bytes disclosed), finalized at session end or revocation. Each finalized receipt embeds the BLAKE3 hash of the previous receipt — a per-vault hash chain making the audit log tamper-evident. `tessera receipts verify` walks the chain.
-- **Revocation:** `tessera sessions revoke <id|--all>` takes effect on the next tool call (guardian checks session validity per call). Guardian holds the DEK in memory only while unlocked; `tessera guardian lock` zeroes it.
+- **Revocation:** `tessera sessions revoke <id|--all>` and `tessera pair revoke <id>` take effect on the next tool call. Editing/deleting a lens also invalidates pairings for its prior revision. Prior disclosure cannot be retracted. Guardian holds the DEK in memory only while unlocked; `tessera guardian lock` zeroes it.
 - Rate limiting per session (default 100 queries/min) as in v3.
 
 ## 6. CLI surface (v1)

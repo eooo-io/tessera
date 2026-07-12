@@ -123,6 +123,7 @@ pub fn issue_code(
             "pairing is not active for this client".to_owned(),
         ));
     }
+    pairing::approved_lens(vault, &pairing)?;
     let code = random_secret();
     let expires = chrono::Utc::now() + chrono::Duration::minutes(5);
     vault.conn().execute(
@@ -195,6 +196,7 @@ pub fn exchange_code(
                 "owner approval is no longer active".to_owned(),
             ));
         }
+        pairing::approved_lens(vault, &pairing)?;
         let now = chrono::Utc::now();
         let token_expires = now + chrono::Duration::minutes(pairing.ttl_minutes as i64);
         let access_token = random_secret();
@@ -274,6 +276,7 @@ pub fn validate_token(
     {
         return Err(OAuthError::InvalidToken);
     }
+    pairing::approved_lens(vault, &pairing).map_err(|_| OAuthError::InvalidToken)?;
     Ok(TokenBinding {
         client_id: binding.0,
         pairing_id: binding.1,
@@ -386,6 +389,13 @@ mod tests {
         assert_ne!(stored_token, grant.access_token);
         assert!(matches!(
             validate_token(&vault, &grant.access_token, "https://other.example/mcp"),
+            Err(OAuthError::InvalidToken)
+        ));
+        let mut changed_lens = lens::get(&vault, &lens_id).expect("lens");
+        changed_lens.allow_metadata = false;
+        lens::update(&vault, &changed_lens).expect("update lens");
+        assert!(matches!(
+            validate_token(&vault, &grant.access_token, resource),
             Err(OAuthError::InvalidToken)
         ));
         pairing::revoke(&vault, &pairing.id).expect("revoke");

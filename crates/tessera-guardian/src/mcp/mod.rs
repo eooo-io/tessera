@@ -57,6 +57,7 @@ fn handle_http_tool(
     msg: &Value,
     id: Value,
 ) -> anyhow::Result<Value> {
+    session.authorize_call(vault)?;
     let live = live_session::start(vault, &session.pairing)?;
     let session_id = live.id.clone();
     let mut receipt_session = match receipt::Session::open_bound(
@@ -239,6 +240,16 @@ pub fn serve_stdio(
                         break;
                     }
                 }
+                if let Err(error) = session.authorize_call(vault) {
+                    write_message(
+                        &mut out,
+                        result(
+                            id.clone(),
+                            tool_error(&format!("authorization ended: {error}")),
+                        ),
+                    )?;
+                    break;
+                }
 
                 let params = msg.get("params");
                 let name = params
@@ -350,9 +361,11 @@ fn initialize_result(session: &GuardianSession) -> Value {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": format!(
-            "This vault is exposed through the lens '{}' for the purpose '{}'. \
-             You can only see what that lens permits; every query is recorded to \
-             a tamper-evident receipt.",
+            "This vault is exposed through the owner-approved lens '{}'. The \
+             declared audit purpose is '{}'; Tessera records but does not \
+             semantically enforce that declaration. You can only see what the \
+             approved lens revision permits, and disclosures are recorded in \
+             the receipt chain.",
             session.lens.name, session.pairing.purpose
         ),
     })

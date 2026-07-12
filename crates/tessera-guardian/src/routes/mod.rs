@@ -748,5 +748,20 @@ mod tests {
             receipts[0].pairing_id.as_deref(),
             Some(receipts[0].agent.agent_id.as_str())
         );
+        drop(receipts);
+        let mut changed_lens = lens::get(&vault, &allowed_lens.id).expect("lens");
+        changed_lens.allow_metadata = false;
+        lens::update(&vault, &changed_lens).expect("change lens");
+        drop(vault);
+
+        let stale = app
+            .oneshot(call(&allowed_artifact, 5))
+            .await
+            .expect("stale token call");
+        assert_eq!(
+            stale.status(),
+            StatusCode::UNAUTHORIZED,
+            "a token never inherits a changed lens policy"
+        );
     }
 }

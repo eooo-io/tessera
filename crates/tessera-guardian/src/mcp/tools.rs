@@ -63,6 +63,7 @@ pub fn definitions(session: &GuardianSession) -> Vec<Value> {
             ),
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "query": { "type": "string", "description": "natural-language question" },
                     "top_k": { "type": "integer", "description": "max results (default 5)" }
@@ -79,6 +80,7 @@ pub fn definitions(session: &GuardianSession) -> Vec<Value> {
             ),
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "artifact_id": { "type": "string", "description": "the artifact id (art_…)" }
                 },
@@ -92,7 +94,7 @@ pub fn definitions(session: &GuardianSession) -> Vec<Value> {
             } else {
                 "Unavailable: this lens does not permit metadata disclosure.".to_string()
             },
-            "inputSchema": { "type": "object", "properties": {} }
+            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
         }),
     ]
 }
@@ -295,6 +297,7 @@ mod tests {
             approved_at: "2026-07-06T00:00:00Z".into(),
             revoked_at: None,
             oauth_client_id: None,
+            lens_updated_at: Some(lens.updated_at.to_rfc3339()),
         };
         let gsession = GuardianSession { pairing, lens };
         Fixture {
