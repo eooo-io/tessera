@@ -103,6 +103,13 @@ vector path, so production remains vector-only. The reproducible fixture,
 measurements, rejected design, and reindex decision are recorded in
 [`docs/evidence/hybrid-retrieval-experiment.md`](docs/evidence/hybrid-retrieval-experiment.md).
 
+The realistic private-corpus gate uses a local `private-eval-v1` plan with
+30–50 owner-reviewed questions. Its schema is
+[`spec/private-eval-plan.schema.json`](spec/private-eval-plan.schema.json), and
+the v0.1 thresholds are predeclared in
+[`docs/evidence/private-eval-thresholds-v0.1.md`](docs/evidence/private-eval-thresholds-v0.1.md).
+Raw private plans, queries, source text, and raw results stay outside Git.
+
 ## Project Structure
 
 ```

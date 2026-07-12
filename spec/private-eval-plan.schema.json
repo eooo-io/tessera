@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tessera.ai/schemas/private-eval-plan.json",
+  "title": "Tessera Private Evaluation Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plan_id", "reviewed_by", "review_date", "thresholds", "questions"],
+  "properties": {
+    "schema_version": { "const": "private-eval-v1" },
+    "plan_id": { "type": "string", "minLength": 1 },
+    "reviewed_by": { "type": "string", "minLength": 1 },
+    "review_date": { "type": "string", "format": "date" },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_recall_at_10", "min_no_answer_precision", "min_no_answer_recall", "max_policy_leakage", "max_quarantine_leakage", "max_stale_retrieval_rate", "min_citation_reconstruction", "min_receipt_verification"],
+      "properties": {
+        "min_recall_at_10": { "type": "number", "minimum": 0, "maximum": 1 },
+        "min_no_answer_precision": { "type": "number", "minimum": 0, "maximum": 1 },
+        "min_no_answer_recall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "max_policy_leakage": { "type": "integer", "minimum": 0 },
+        "max_quarantine_leakage": { "type": "integer", "minimum": 0 },
+        "max_stale_retrieval_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "min_citation_reconstruction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "min_receipt_verification": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "query", "lens_id", "category", "expected_disclosure_mode", "severity", "rationale", "reviewed_at", "expected_sources", "blocked_space_ids"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "query": { "type": "string", "minLength": 1 },
+          "lens_id": { "type": "string", "pattern": "^lens_" },
+          "category": { "enum": ["semantic", "exact_identifier", "filename", "date_version", "overlap", "stale_superseded", "near_duplicate", "adversarial", "unanswerable"] },
+          "expected_disclosure_mode": { "enum": ["summary", "excerpt", "full"] },
+          "severity": { "enum": ["low", "medium", "high", "critical"] },
+          "rationale": { "type": "string", "minLength": 1 },
+          "reviewed_at": { "type": "string", "format": "date" },
+          "expected_sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["artifact_id", "artifact_version_id"],
+              "properties": {
+                "artifact_id": { "type": "string", "pattern": "^art_" },
+                "artifact_version_id": { "type": "string", "pattern": "^artv_" }
+              }
+            }
+          },
+          "blocked_space_ids": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^space_" }
+          }
+        }
+      }
+    }
+  }
+}
