@@ -46,6 +46,224 @@ pub struct ThresholdedSearch {
     pub diagnostics: SearchDiagnostics,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReindexProgress {
+    pub model_version: String,
+    pub status: String,
+    pub processed_chunks: usize,
+    pub total_chunks: usize,
+}
+
+/// Return durable shadow-index progress, if a reindex has ever started.
+pub fn reindex_progress(vault: &Vault) -> Result<Option<ReindexProgress>, SearchError> {
+    let state = vault.conn().query_row(
+        "SELECT model_version, status, total_chunks FROM reindex_state WHERE singleton = 1",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        },
+    );
+    let (model_version, status, total) = match state {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let processed: i64 =
+        vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM reindex_embeddings_map", [], |r| {
+                r.get(0)
+            })?;
+    Ok(Some(ReindexProgress {
+        model_version,
+        status,
+        processed_chunks: processed as usize,
+        total_chunks: total as usize,
+    }))
+}
+
+/// Request cooperative cancellation. A running reindex checks this durable
+/// flag between chunks; the active index is unaffected.
+pub fn cancel_reindex(vault: &Vault) -> Result<bool, SearchError> {
+    let changed = vault.conn().execute(
+        "UPDATE reindex_state SET status = 'cancel_requested', updated_at = ?1
+         WHERE singleton = 1 AND status = 'running'",
+        [chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(changed == 1)
+}
+
+/// Build a complete shadow index, resuming any compatible partial run. Each
+/// chunk is committed independently. Only a complete shadow replaces the
+/// active index, in one rollback-safe database transaction.
+///
+/// `max_chunks` is an operational pause hook useful for bounded maintenance;
+/// `None` runs until complete or cooperatively cancelled.
+pub fn reindex(
+    vault: &Vault,
+    embedder: &dyn EmbeddingProvider,
+    max_chunks: Option<usize>,
+) -> Result<ReindexProgress, SearchError> {
+    if embedder.dimensions() != crate::index::sqlite_vec::DIMENSIONS {
+        return Err(IndexError::DimensionMismatch {
+            expected: crate::index::sqlite_vec::DIMENSIONS,
+            found: embedder.dimensions(),
+        }
+        .into());
+    }
+    let total: i64 = vault
+        .conn()
+        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Some(existing) = reindex_progress(vault)? {
+        if existing.status != "complete" && existing.model_version != embedder.model_version() {
+            return Err(IndexError::UnknownModel(format!(
+                "partial reindex uses '{}' but requested '{}'; resume it or explicitly complete/cancel before changing models",
+                existing.model_version,
+                embedder.model_version()
+            ))
+            .into());
+        }
+        if existing.status == "complete" {
+            vault
+                .conn()
+                .execute("DELETE FROM reindex_embeddings_map", [])?;
+            vault
+                .conn()
+                .execute("DELETE FROM reindex_chunk_embeddings", [])?;
+        }
+    }
+    vault.conn().execute(
+        "INSERT INTO reindex_state (singleton, model_version, status, total_chunks, started_at, updated_at)
+         VALUES (1, ?1, 'running', ?2, ?3, ?3)
+         ON CONFLICT(singleton) DO UPDATE SET
+           model_version = excluded.model_version,
+           status = 'running', total_chunks = excluded.total_chunks,
+           updated_at = excluded.updated_at",
+        rusqlite::params![embedder.model_version(), total, now],
+    )?;
+
+    let pending: Vec<(String, String, u64, u64)> = {
+        let mut stmt = vault.conn().prepare(
+            "SELECT ch.id, dt.blob_hash, ch.byte_offset_start, ch.byte_offset_end
+             FROM chunks ch
+             JOIN derived_text dt ON dt.id = ch.derived_text_id
+             LEFT JOIN reindex_embeddings_map rem ON rem.chunk_id = ch.id
+             WHERE rem.chunk_id IS NULL
+             ORDER BY ch.created_at, ch.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let dek = vault.dek()?;
+    let limit = max_chunks.unwrap_or(usize::MAX);
+    for (chunk_id, blob_hash, start, end) in pending.into_iter().take(limit) {
+        let status: String = vault.conn().query_row(
+            "SELECT status FROM reindex_state WHERE singleton = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if status == "cancel_requested" {
+            return Ok(reindex_progress(vault)?.expect("state exists"));
+        }
+        let text_bytes = vault
+            .blobs()
+            .get(dek, &crate::blob::BlobHash(blob_hash))
+            .map_err(VaultError::Blob)?;
+        let full = String::from_utf8_lossy(&text_bytes);
+        let slice = full.get(start as usize..end as usize).unwrap_or(&full);
+        let vector = embedder.embed(slice)?;
+        if vector.len() != crate::index::sqlite_vec::DIMENSIONS {
+            return Err(IndexError::DimensionMismatch {
+                expected: crate::index::sqlite_vec::DIMENSIONS,
+                found: vector.len(),
+            }
+            .into());
+        }
+        let blob: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
+        vault.conn().execute_batch("BEGIN IMMEDIATE")?;
+        let inserted = (|| -> Result<(), rusqlite::Error> {
+            vault.conn().execute(
+                "INSERT INTO reindex_chunk_embeddings (embedding) VALUES (?1)",
+                rusqlite::params![blob],
+            )?;
+            let rowid = vault.conn().last_insert_rowid();
+            vault.conn().execute(
+                "INSERT INTO reindex_embeddings_map (chunk_id, vec_rowid, model_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![chunk_id, rowid, embedder.model_version(), chrono::Utc::now().to_rfc3339()],
+            )?;
+            vault.conn().execute(
+                "UPDATE reindex_state SET updated_at = ?1 WHERE singleton = 1",
+                [chrono::Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })();
+        match inserted {
+            Ok(()) => vault.conn().execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = vault.conn().execute_batch("ROLLBACK");
+                return Err(error.into());
+            }
+        }
+    }
+
+    let progress = reindex_progress(vault)?.expect("state exists");
+    if progress.processed_chunks == progress.total_chunks {
+        // An ingest may have committed while the shadow was building. Recheck
+        // at the activation boundary; a later invocation will add those new
+        // chunks rather than publishing a knowingly incomplete shadow.
+        let current_total: i64 =
+            vault
+                .conn()
+                .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        if current_total as usize != progress.total_chunks {
+            vault.conn().execute(
+                "UPDATE reindex_state SET total_chunks = ?1, updated_at = ?2 WHERE singleton = 1",
+                rusqlite::params![current_total, chrono::Utc::now().to_rfc3339()],
+            )?;
+            return Ok(reindex_progress(vault)?.expect("state exists"));
+        }
+        let activated = (|| -> Result<(), rusqlite::Error> {
+            vault.conn().execute_batch("BEGIN IMMEDIATE")?;
+            vault.conn().execute("DELETE FROM embeddings_map", [])?;
+            vault.conn().execute("DELETE FROM chunk_embeddings", [])?;
+            vault.conn().execute(
+                "INSERT INTO chunk_embeddings (rowid, embedding)
+                 SELECT rowid, embedding FROM reindex_chunk_embeddings",
+                [],
+            )?;
+            vault.conn().execute(
+                "INSERT INTO embeddings_map (chunk_id, vec_rowid, model_version, created_at)
+                 SELECT chunk_id, vec_rowid, model_version, created_at FROM reindex_embeddings_map",
+                [],
+            )?;
+            vault.conn().execute(
+                "UPDATE reindex_state SET status = 'complete', updated_at = ?1 WHERE singleton = 1",
+                [chrono::Utc::now().to_rfc3339()],
+            )?;
+            vault.conn().execute_batch("COMMIT")?;
+            Ok(())
+        })();
+        if let Err(error) = activated {
+            let _ = vault.conn().execute_batch("ROLLBACK");
+            return Err(error.into());
+        }
+    }
+    Ok(reindex_progress(vault)?.expect("state exists"))
+}
+
 /// Owner-facing constraints: everything the owner may see (full sensitivity
 /// ceiling, all spaces). The live-only rule still applies — it always does.
 pub fn owner_constraints() -> RetrievalConstraints {
@@ -362,6 +580,53 @@ mod tests {
 
         let again = embed_missing(&vault, &FakeEmbedder).expect("re-embed");
         assert_eq!(again, 0, "second run must be a no-op");
+    }
+
+    #[test]
+    fn reindex_is_resumable_and_preserves_active_index_until_complete() {
+        let (_dir, vault) = corpus();
+        embed_missing(&vault, &FakeEmbedder).expect("initial active index");
+        let active_before: i64 = vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM embeddings_map", [], |r| r.get(0))
+            .expect("active count");
+
+        let partial = reindex(&vault, &FakeEmbedder, Some(1)).expect("partial reindex");
+        assert_eq!(partial.status, "running");
+        assert_eq!(partial.processed_chunks, 1);
+        assert_eq!(partial.total_chunks, 2);
+        let active_during: i64 = vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM embeddings_map", [], |r| r.get(0))
+            .expect("active count");
+        assert_eq!(
+            active_during, active_before,
+            "partial shadow replaced active index"
+        );
+        assert!(!query(
+            &vault,
+            &FakeEmbedder,
+            "fire rating corridor",
+            &owner_constraints(),
+            5
+        )
+        .expect("active query during reindex")
+        .is_empty());
+
+        assert!(cancel_reindex(&vault).expect("cancel"));
+        assert_eq!(
+            reindex_progress(&vault).expect("progress").unwrap().status,
+            "cancel_requested"
+        );
+        let completed = reindex(&vault, &FakeEmbedder, None).expect("resume and activate");
+        assert_eq!(completed.status, "complete");
+        assert_eq!(completed.processed_chunks, 2);
+        assert_eq!(completed.total_chunks, 2);
+        let active_after: i64 = vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM embeddings_map", [], |r| r.get(0))
+            .expect("active count");
+        assert_eq!(active_after, active_before);
     }
 
     #[test]

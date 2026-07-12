@@ -1,6 +1,10 @@
 //! ONNX Runtime implementation of `EmbeddingProvider`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{mean_pool_normalize, EmbedError, EmbeddingProvider};
 
@@ -12,34 +16,125 @@ pub const DIMENSIONS: usize = 384;
 /// documented limitation for #42/#43 rather than being mislabeled as truth.
 pub const CALIBRATED_RELEVANCE_FLOOR: f32 = 0.20;
 const MAX_TOKENS: usize = 256;
+pub const TRUSTED_MANIFEST_JSON: &str =
+    include_str!("../../../../spec/model-manifests/all-MiniLM-L6-v2-onnx-1.json");
 
-/// Files expected in the model directory, with their download sources.
-pub const MODEL_FILES: &[(&str, &str)] = &[
-    (
-        "model.onnx",
-        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-    ),
-    (
-        "tokenizer.json",
-        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-    ),
-];
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedModelFile {
+    pub path: String,
+    pub source_path: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedModelManifest {
+    pub schema_version: u32,
+    pub model_name: String,
+    pub model_version: String,
+    pub source_repository: String,
+    pub revision: String,
+    pub license: String,
+    pub dimensions: usize,
+    pub max_tokens: usize,
+    pub tokenizer_version: String,
+    pub runtime_versions: String,
+    pub provenance: String,
+    pub files: Vec<TrustedModelFile>,
+}
+
+pub fn trusted_manifest() -> Result<TrustedModelManifest, EmbedError> {
+    let manifest: TrustedModelManifest = serde_json::from_str(TRUSTED_MANIFEST_JSON)
+        .map_err(|e| EmbedError::ModelVerification(format!("invalid built-in manifest: {e}")))?;
+    if manifest.schema_version != 1
+        || manifest.model_name != MODEL_NAME
+        || manifest.model_version != MODEL_VERSION
+        || manifest.dimensions != DIMENSIONS
+        || manifest.max_tokens != MAX_TOKENS
+    {
+        return Err(EmbedError::ModelVerification(
+            "built-in manifest disagrees with the fixed v1 runtime contract".into(),
+        ));
+    }
+    Ok(manifest)
+}
+
+pub fn download_url(manifest: &TrustedModelManifest, file: &TrustedModelFile) -> String {
+    format!(
+        "{}/resolve/{}/{}",
+        manifest.source_repository, manifest.revision, file.source_path
+    )
+}
 
 /// Default model directory: `$TESSERA_MODEL_DIR` or the per-user data dir.
 pub fn default_model_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("TESSERA_MODEL_DIR") {
         return PathBuf::from(dir).join(MODEL_NAME);
     }
-    let base = std::env::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Library/Application Support/tessera/models")
-        .join(MODEL_NAME)
+    #[cfg(target_os = "macos")]
+    let base = home.join("Library/Application Support/tessera/models");
+    #[cfg(not(target_os = "macos"))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("tessera/models");
+    base.join(MODEL_NAME)
 }
 
-/// Whether both model files are present.
+/// Whether all trusted model files are present. Loading additionally verifies
+/// their sizes and digests.
 pub fn model_present(dir: &Path) -> bool {
-    MODEL_FILES.iter().all(|(name, _)| dir.join(name).is_file())
+    trusted_manifest()
+        .map(|m| m.files.iter().all(|f| dir.join(&f.path).is_file()))
+        .unwrap_or(false)
+}
+
+/// Verify every activated byte against the repository-controlled manifest.
+pub fn verify_model_dir(dir: &Path) -> Result<TrustedModelManifest, EmbedError> {
+    let manifest = trusted_manifest()?;
+    for file in &manifest.files {
+        let path = dir.join(&file.path);
+        let metadata = std::fs::metadata(&path).map_err(|e| {
+            EmbedError::ModelVerification(format!(
+                "{} is missing or unreadable ({e}); run `tessera model fetch` or `tessera model install --source DIR`",
+                path.display()
+            ))
+        })?;
+        if !metadata.is_file() || metadata.len() != file.size {
+            return Err(EmbedError::ModelVerification(format!(
+                "{} has size {}, expected {}",
+                path.display(),
+                metadata.len(),
+                file.size
+            )));
+        }
+        let mut input = std::fs::File::open(&path).map_err(|e| {
+            EmbedError::ModelVerification(format!("cannot read {}: {e}", path.display()))
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = input.read(&mut buffer).map_err(|e| {
+                EmbedError::ModelVerification(format!("cannot read {}: {e}", path.display()))
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != file.sha256 {
+            return Err(EmbedError::ModelVerification(format!(
+                "{} has SHA-256 {actual}, expected {}",
+                path.display(),
+                file.sha256
+            )));
+        }
+    }
+    Ok(manifest)
 }
 
 pub struct OnnxEmbedder {
@@ -54,6 +149,7 @@ impl OnnxEmbedder {
         if !model_present(dir) {
             return Err(EmbedError::ModelMissing(dir.display().to_string()));
         }
+        verify_model_dir(dir)?;
         let session = ort::session::Session::builder()
             .and_then(|mut b| b.commit_from_file(dir.join("model.onnx")))
             .map_err(|e| EmbedError::ModelLoad(e.to_string()))?;
@@ -211,5 +307,29 @@ mod tests {
             Err(other) => panic!("expected ModelMissing, got {other:?}"),
             Ok(_) => panic!("load must fail without model files"),
         }
+    }
+
+    #[test]
+    fn substituted_model_files_fail_verification_before_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("model.onnx"), b"not the trusted model").expect("write");
+        std::fs::write(dir.path().join("tokenizer.json"), b"{}").expect("write");
+
+        let error = verify_model_dir(dir.path()).expect_err("substitution must fail");
+        assert!(
+            error.to_string().contains("expected"),
+            "diagnostic should identify the violated trusted property: {error}"
+        );
+        assert!(OnnxEmbedder::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn trusted_manifest_is_pinned_and_matches_fixed_v1_contract() {
+        let manifest = trusted_manifest().expect("manifest");
+        assert_eq!(manifest.revision.len(), 40);
+        assert!(!manifest.revision.contains("main"));
+        assert_eq!(manifest.dimensions, DIMENSIONS);
+        assert_eq!(manifest.license, "Apache-2.0");
+        assert!(manifest.files.iter().all(|file| file.sha256.len() == 64));
     }
 }

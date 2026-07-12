@@ -125,10 +125,52 @@ pub enum Command {
     },
 }
 
+#[cfg(test)]
+mod model_install_tests {
+    use super::activate_model;
+
+    #[test]
+    fn failed_verification_leaves_current_installation_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("all-MiniLM-L6-v2");
+        std::fs::create_dir(&target).expect("active dir");
+        std::fs::write(target.join("active-marker"), b"last working install").expect("marker");
+
+        let error = activate_model(&target, |staging| {
+            std::fs::write(staging.join("model.onnx"), b"substituted")?;
+            std::fs::write(staging.join("tokenizer.json"), b"{}")?;
+            Ok(())
+        })
+        .expect_err("untrusted stage must fail");
+
+        assert!(error.to_string().contains("verification"));
+        assert_eq!(
+            std::fs::read(target.join("active-marker")).expect("active marker"),
+            b"last working install"
+        );
+    }
+}
+
 #[derive(Subcommand)]
 pub enum ModelCommand {
-    /// Download the embedding model files (via curl)
+    /// Download and verify the embedding model from its pinned source
     Fetch,
+    /// Verify and atomically activate model files copied from another machine
+    Install {
+        /// Directory containing model.onnx and tokenizer.json
+        #[arg(long)]
+        source: std::path::PathBuf,
+    },
+    /// Build or resume a shadow vector index, then atomically activate it
+    Reindex {
+        /// Pause after this many new chunks; rerun to resume
+        #[arg(long)]
+        max_chunks: Option<usize>,
+    },
+    /// Show durable shadow-index progress
+    ReindexStatus,
+    /// Request cooperative cancellation without touching the active index
+    ReindexCancel,
     /// Show model installation status
     Status,
 }
@@ -428,6 +470,61 @@ fn parse_csv(s: &str) -> Vec<String> {
         .filter(|x| !x.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// Populate a sibling staging directory, verify every byte, then switch it
+/// into place. The current installation remains active until verification
+/// succeeds, and is restored if activation itself fails.
+fn activate_model(
+    target: &std::path::Path,
+    populate: impl FnOnce(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    use tessera_core::embed::onnx;
+
+    let parent = target
+        .parent()
+        .context("model target has no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let stem = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
+    let staging = parent.join(format!(".{stem}.staging-{}-{nonce}", std::process::id()));
+    let backup = parent.join(format!(".{stem}.backup-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&staging)?;
+
+    let prepared = (|| {
+        populate(&staging)?;
+        onnx::verify_model_dir(&staging)?;
+        std::fs::write(
+            staging.join("trusted-manifest.json"),
+            onnx::TRUSTED_MANIFEST_JSON,
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if let Err(error) = prepared {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let had_active = target.exists();
+    if had_active {
+        std::fs::rename(target, &backup).context("moving current model to rollback slot")?;
+    }
+    if let Err(error) = std::fs::rename(&staging, target) {
+        if had_active {
+            let _ = std::fs::rename(&backup, target);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error).context("activating verified model");
+    }
+    if had_active {
+        std::fs::remove_dir_all(&backup).context("removing retired model installation")?;
+    }
+    Ok(())
 }
 
 /// Build a lens policy through interactive prompts, then persist it. Schema
@@ -1289,43 +1386,108 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
             let dir = onnx::default_model_dir();
             match action {
                 ModelCommand::Status => {
-                    println!(
-                        "{} at {}: {}",
-                        onnx::MODEL_NAME,
-                        dir.display(),
-                        if onnx::model_present(&dir) {
-                            "installed"
-                        } else {
-                            "missing — run `tessera model fetch`"
+                    let manifest = onnx::trusted_manifest()?;
+                    println!("model:    {}", manifest.model_version);
+                    println!("path:     {}", dir.display());
+                    println!("source:   {}", manifest.source_repository);
+                    println!("revision: {}", manifest.revision);
+                    println!("license:  {}", manifest.license);
+                    println!("tokenizer: {}", manifest.tokenizer_version);
+                    println!("runtime:  {}", manifest.runtime_versions);
+                    println!("provenance: {}", manifest.provenance);
+                    match onnx::verify_model_dir(&dir) {
+                        Ok(_) => {
+                            println!("status:   verified");
+                            Ok(())
                         }
-                    );
-                    Ok(())
+                        Err(error) => {
+                            println!("status:   unavailable — {error}");
+                            println!("recovery: `tessera model fetch` (online) or `tessera model install --source DIR` (offline)");
+                            bail!("model is not verified")
+                        }
+                    }
                 }
                 ModelCommand::Fetch => {
-                    std::fs::create_dir_all(&dir)?;
-                    let mut lock = String::new();
-                    for (name, url) in onnx::MODEL_FILES {
-                        let target = dir.join(name);
-                        if target.is_file() {
-                            println!("{name}: already present");
-                        } else {
-                            println!("Fetching {name} …");
+                    let manifest = onnx::trusted_manifest()?;
+                    activate_model(&dir, |staging| {
+                        for file in &manifest.files {
+                            let target = staging.join(&file.path);
+                            let partial = staging.join(format!("{}.part", file.path));
+                            let url = onnx::download_url(&manifest, file);
+                            println!(
+                                "Fetching {} from pinned revision {} …",
+                                file.path, manifest.revision
+                            );
                             let status = std::process::Command::new("curl")
                                 .args(["-L", "--fail", "--progress-bar", "-o"])
-                                .arg(&target)
-                                .arg(url)
+                                .arg(&partial)
+                                .arg(&url)
                                 .status()
                                 .context("running curl")?;
                             if !status.success() {
-                                bail!("download failed for {name}");
+                                bail!("download failed for {}", file.path);
                             }
+                            std::fs::rename(partial, target)?;
                         }
-                        let hash = blake3::hash(&std::fs::read(&target)?);
-                        lock.push_str(&format!("{}  {}\n", hash.to_hex(), name));
+                        Ok(())
+                    })?;
+                    println!("Verified model activated at {}", dir.display());
+                    Ok(())
+                }
+                ModelCommand::Install { source } => {
+                    let manifest = onnx::trusted_manifest()?;
+                    activate_model(&dir, |staging| {
+                        for file in &manifest.files {
+                            std::fs::copy(source.join(&file.path), staging.join(&file.path))
+                                .with_context(|| {
+                                    format!("copying {} from {}", file.path, source.display())
+                                })?;
+                        }
+                        Ok(())
+                    })?;
+                    println!("Verified offline model activated at {}", dir.display());
+                    Ok(())
+                }
+                ModelCommand::Reindex { max_chunks } => {
+                    onnx::verify_model_dir(&dir)?;
+                    let vault = Vault::open(&vault_path, &passphrase()?)?;
+                    let embedder = onnx::OnnxEmbedder::load(&dir)?;
+                    let progress = tessera_core::search::reindex(&vault, &embedder, max_chunks)?;
+                    println!(
+                        "reindex: {} {}/{} ({})",
+                        progress.model_version,
+                        progress.processed_chunks,
+                        progress.total_chunks,
+                        progress.status
+                    );
+                    if progress.status == "cancel_requested" {
+                        println!("active index preserved; rerun `tessera model reindex` to resume");
+                    } else if progress.status != "complete" {
+                        println!("shadow index saved; rerun `tessera model reindex` to resume");
                     }
-                    // Trust-on-first-fetch: pin what we downloaded.
-                    std::fs::write(dir.join("models.lock"), lock)?;
-                    println!("Model ready at {}", dir.display());
+                    Ok(())
+                }
+                ModelCommand::ReindexStatus => {
+                    let vault = Vault::open(&vault_path, &passphrase()?)?;
+                    match tessera_core::search::reindex_progress(&vault)? {
+                        Some(progress) => println!(
+                            "reindex: {} {}/{} ({})",
+                            progress.model_version,
+                            progress.processed_chunks,
+                            progress.total_chunks,
+                            progress.status
+                        ),
+                        None => println!("reindex: never started; active index unchanged"),
+                    }
+                    Ok(())
+                }
+                ModelCommand::ReindexCancel => {
+                    let vault = Vault::open(&vault_path, &passphrase()?)?;
+                    if tessera_core::search::cancel_reindex(&vault)? {
+                        println!("cancellation requested; active index remains unchanged");
+                    } else {
+                        println!("no running reindex to cancel");
+                    }
                     Ok(())
                 }
             }

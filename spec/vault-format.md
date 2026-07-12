@@ -65,7 +65,7 @@ UTF-8 JSON object, pretty-printed, trailing newline. Written by
 |---|---|---|
 | `name` | string | Model name, e.g. `"all-MiniLM-L6-v2"`. |
 | `version` | string | Implementation/version identifier. |
-| `dimensions` | integer | Vector dimensionality. A reader that cannot embed queries with a registered model MUST NOT silently mix vector spaces; it should offer re-embedding. |
+| `dimensions` | integer | Vector dimensionality. Format v1 permits only the repository-pinned `all-MiniLM-L6-v2@onnx-1` 384-dimensional space. A reader that cannot verify and load it MUST fail closed and offer explicit provisioning or reindexing; it MUST NOT silently mix vector spaces. |
 
 **Forward compatibility:** unknown fields — top-level or inside `crypto` —
 MUST be preserved on read-modify-write (implemented via captured extra
@@ -93,6 +93,9 @@ Migration 0005 adds vector storage: `chunk_embeddings` (a sqlite-vec `vec0`
 virtual table, `float[384]`; readers MUST register the sqlite-vec extension
 before opening) and `embeddings_map` (chunk ↔ vec rowid, producing model
 version — mixed model versions in one vault are refused at query time).
+Dimension changes are explicitly forbidden in format v1. Reindexing uses a
+durable same-dimension shadow table and atomically replaces the active derived
+index only after every chunk is complete; see `docs/model-supply-chain.md`.
 Migrations 0006–0009 append lenses, summaries, pairings, and live sessions.
 Migration 0010 adds `receipt_chain_state` (the singleton next-sequence/head)
 and `receipts_index` (unique receipt id and sequence, predecessor/self hashes,
