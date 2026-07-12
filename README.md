@@ -98,6 +98,11 @@ that a returned passage is true or answers the question. Calibration method,
 tradeoffs, and limitations are recorded in
 [`docs/evidence/relevance-floor-calibration.md`](docs/evidence/relevance-floor-calibration.md).
 
+A bounded FTS5/reciprocal-rank-fusion experiment found no improvement over the
+vector path, so production remains vector-only. The reproducible fixture,
+measurements, rejected design, and reindex decision are recorded in
+[`docs/evidence/hybrid-retrieval-experiment.md`](docs/evidence/hybrid-retrieval-experiment.md).
+
 ## Project Structure
 
 ```
