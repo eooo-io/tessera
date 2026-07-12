@@ -36,6 +36,12 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// Return the embedding dimensionality.
     fn dimensions(&self) -> usize;
+
+    /// Model-version-specific minimum cosine score calibrated for safe
+    /// disclosure. Unknown/custom providers fail closed under semantic retrieval.
+    fn calibrated_relevance_floor(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// Mean-pool token embeddings using the attention mask, then L2-normalize.

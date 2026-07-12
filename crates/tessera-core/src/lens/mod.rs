@@ -141,6 +141,10 @@ pub struct LensPolicy {
     /// (`DEFAULT_MAX_QUERIES_PER_MIN`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_queries_per_min: Option<u32>,
+    /// Optional stricter cosine relevance floor. The effective threshold is
+    /// `max(model calibration, this value)`; a lens can never lower safety.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_relevance_score: Option<f32>,
     #[serde(default = "now")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default = "now")]
@@ -173,6 +177,7 @@ impl LensPolicy {
             approval_rule: ApprovalRule::OnSensitive,
             default_ttl_minutes: 60,
             max_queries_per_min: None,
+            min_relevance_score: None,
             created_at: ts,
             updated_at: ts,
         }
@@ -368,6 +373,7 @@ mod tests {
         p.max_quote_chars = Some(800);
         p.media_types = vec!["text/markdown".into()];
         p.max_queries_per_min = Some(100);
+        p.min_relevance_score = Some(0.5);
         p
     }
 

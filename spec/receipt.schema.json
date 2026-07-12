@@ -187,16 +187,36 @@
     },
     "v2Query": {
       "type": "object",
-      "required": ["query_id", "timestamp", "query_text", "artifacts_accessed"],
+      "required": ["query_id", "timestamp", "query_text", "artifacts_accessed", "outcome", "candidates_considered", "rejected_below_threshold"],
       "properties": {
         "query_id": { "type": "string" },
         "timestamp": { "type": "string", "format": "date-time" },
         "query_text": { "type": "string" },
+        "outcome": { "enum": ["results", "no_result", "failed"] },
+        "relevance_threshold": { "type": "number", "minimum": -1, "maximum": 1 },
+        "candidates_considered": { "type": "integer", "minimum": 0 },
+        "rejected_below_threshold": { "type": "integer", "minimum": 0 },
+        "best_candidate_score": { "type": "number", "minimum": -1, "maximum": 1 },
+        "failure_kind": { "type": "string" },
         "artifacts_accessed": {
           "type": "array",
           "items": { "$ref": "#/$defs/v2Access" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "failed" } } },
+          "then": { "required": ["failure_kind"], "properties": { "artifacts_accessed": { "maxItems": 0 } } }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "no_result" } } },
+          "then": { "required": ["relevance_threshold"], "properties": { "artifacts_accessed": { "maxItems": 0 } } }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "results" } } },
+          "then": { "properties": { "artifacts_accessed": { "minItems": 1 } } }
+        }
+      ]
     },
     "summary": {
       "type": "object",

@@ -78,6 +78,12 @@
       "minimum": 1,
       "description": "Per-session query rate cap; absent means the system default (100)."
     },
+    "min_relevance_score": {
+      "type": "number",
+      "minimum": -1.0,
+      "maximum": 1.0,
+      "description": "Optional stricter cosine relevance floor. Cannot lower the model-calibrated system floor."
+    },
     "created_at": {
       "type": "string",
       "format": "date-time"

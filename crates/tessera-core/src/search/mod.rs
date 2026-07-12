@@ -18,6 +18,8 @@ pub enum SearchError {
     Vault(#[from] VaultError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("no relevance calibration for embedding model {0}; refusing disclosure")]
+    UncalibratedModel(String),
 }
 
 /// A single search result with citation metadata.
@@ -28,6 +30,20 @@ pub struct SearchResult {
     pub chunk_id: String,
     pub relevance_score: f32,
     pub byte_range: (u64, u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchDiagnostics {
+    pub relevance_threshold: f32,
+    pub candidates_considered: u32,
+    pub rejected_below_threshold: u32,
+    pub best_candidate_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThresholdedSearch {
+    pub results: Vec<SearchResult>,
+    pub diagnostics: SearchDiagnostics,
 }
 
 /// Owner-facing constraints: everything the owner may see (full sensitivity
@@ -115,7 +131,7 @@ pub fn embed_missing(
 
 /// Semantic search: embed the query, run the policy-filtered KNN, hydrate
 /// results with artifact titles and citation byte ranges.
-pub fn query(
+fn query_candidates(
     vault: &Vault,
     embedder: &dyn EmbeddingProvider,
     text: &str,
@@ -150,6 +166,50 @@ pub fn query(
     Ok(results)
 }
 
+/// Semantic search under the model's calibrated system floor.
+pub fn query(
+    vault: &Vault,
+    embedder: &dyn EmbeddingProvider,
+    text: &str,
+    constraints: &RetrievalConstraints,
+    top_k: usize,
+) -> Result<Vec<SearchResult>, SearchError> {
+    Ok(query_evaluated(vault, embedder, text, constraints, top_k, None)?.results)
+}
+
+/// Semantic search with diagnostics and an optional stricter caller floor.
+pub fn query_evaluated(
+    vault: &Vault,
+    embedder: &dyn EmbeddingProvider,
+    text: &str,
+    constraints: &RetrievalConstraints,
+    top_k: usize,
+    stricter_floor: Option<f32>,
+) -> Result<ThresholdedSearch, SearchError> {
+    let system_floor = embedder
+        .calibrated_relevance_floor()
+        .ok_or_else(|| SearchError::UncalibratedModel(embedder.model_version().to_owned()))?;
+    let threshold = stricter_floor
+        .map(|requested| requested.max(system_floor))
+        .unwrap_or(system_floor);
+    let mut candidates = query_candidates(vault, embedder, text, constraints, top_k)?;
+    let best_candidate_score = candidates
+        .first()
+        .map(|candidate| candidate.relevance_score);
+    let candidates_considered = candidates.len() as u32;
+    candidates.retain(|candidate| candidate.relevance_score >= threshold);
+    let rejected_below_threshold = candidates_considered - candidates.len() as u32;
+    Ok(ThresholdedSearch {
+        results: candidates,
+        diagnostics: SearchDiagnostics {
+            relevance_threshold: threshold,
+            candidates_considered,
+            rejected_below_threshold,
+            best_candidate_score,
+        },
+    })
+}
+
 /// Policy-filtered semantic search under a lens (#19). Compiles the lens into
 /// retrieval constraints and runs the identical single-query path used by the
 /// owner view — so the CLI `query --lens` and the guardian exercise the same
@@ -161,7 +221,25 @@ pub fn search_with_lens(
     text: &str,
     top_k: usize,
 ) -> Result<Vec<SearchResult>, SearchError> {
-    query(vault, embedder, text, &lens.to_constraints(), top_k)
+    Ok(search_with_lens_evaluated(vault, embedder, lens, text, top_k)?.results)
+}
+
+/// Lens retrieval with a model-calibrated, fail-closed relevance floor.
+pub fn search_with_lens_evaluated(
+    vault: &Vault,
+    embedder: &dyn EmbeddingProvider,
+    lens: &crate::lens::LensPolicy,
+    text: &str,
+    top_k: usize,
+) -> Result<ThresholdedSearch, SearchError> {
+    query_evaluated(
+        vault,
+        embedder,
+        text,
+        &lens.to_constraints(),
+        top_k,
+        lens.min_relevance_score,
+    )
 }
 
 #[cfg(test)]
@@ -169,6 +247,7 @@ mod tests {
     use super::*;
     use crate::artifact::{self, ArtifactState};
     use crate::crypto::KdfParams;
+    use crate::lens::LensPolicy;
     use crate::space::{self, SpaceId};
     use crate::{chunk, extract, inbox};
     use std::path::Path;
@@ -212,6 +291,29 @@ mod tests {
 
         fn dimensions(&self) -> usize {
             384
+        }
+
+        fn calibrated_relevance_floor(&self) -> Option<f32> {
+            Some(0.0)
+        }
+    }
+
+    struct FloorEmbedder(f32);
+    impl EmbeddingProvider for FloorEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            FakeEmbedder.embed(text)
+        }
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            FakeEmbedder.embed_batch(texts)
+        }
+        fn model_version(&self) -> &str {
+            "fake-trigram@1"
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn calibrated_relevance_floor(&self) -> Option<f32> {
+            Some(self.0)
         }
     }
 
@@ -281,7 +383,6 @@ mod tests {
 
     #[test]
     fn search_with_lens_scopes_to_included_space() {
-        use crate::lens::LensPolicy;
         let (_dir, vault) = corpus();
         embed_missing(&vault, &FakeEmbedder).expect("embed");
         let space = space::list(&vault).expect("list")[0].id.clone();
@@ -307,6 +408,113 @@ mod tests {
         let none =
             search_with_lens(&vault, &FakeEmbedder, &blocked, "fire rating", 5).expect("query");
         assert!(none.is_empty(), "excluded space must yield no results");
+    }
+
+    #[test]
+    fn relevance_floor_is_inclusive_and_lens_can_only_raise_it() {
+        let (_dir, vault) = corpus();
+        embed_missing(&vault, &FakeEmbedder).expect("embed");
+        let space = space::list(&vault).expect("list")[0].id.clone();
+        let mut lens = LensPolicy::new("Docs", vec![space]);
+        lens.sensitivity_ceiling = Sensitivity::Restricted;
+
+        let raw = query_candidates(
+            &vault,
+            &FakeEmbedder,
+            "fire rating corridor walls",
+            &lens.to_constraints(),
+            2,
+        )
+        .expect("raw query");
+        let best = raw[0].relevance_score;
+
+        lens.min_relevance_score = Some(best);
+        let boundary = search_with_lens_evaluated(
+            &vault,
+            &FakeEmbedder,
+            &lens,
+            "fire rating corridor walls",
+            2,
+        )
+        .expect("boundary query");
+        assert_eq!(boundary.results.len(), 1, "score equal to floor must pass");
+        assert_eq!(boundary.diagnostics.relevance_threshold, best);
+
+        lens.min_relevance_score = Some(best + f32::EPSILON);
+        let above = search_with_lens_evaluated(
+            &vault,
+            &FakeEmbedder,
+            &lens,
+            "fire rating corridor walls",
+            2,
+        )
+        .expect("above-boundary query");
+        assert!(
+            above.results.is_empty(),
+            "score below floor must be rejected"
+        );
+        assert_eq!(above.diagnostics.rejected_below_threshold, 2);
+
+        lens.min_relevance_score = Some(-1.0);
+        let cannot_lower = search_with_lens_evaluated(
+            &vault,
+            &FakeEmbedder,
+            &lens,
+            "fire rating corridor walls",
+            2,
+        )
+        .expect("system-floor query");
+        assert_eq!(cannot_lower.diagnostics.relevance_threshold, 0.0);
+    }
+
+    #[test]
+    fn unrelated_query_below_floor_discloses_nothing() {
+        let (_dir, vault) = corpus();
+        embed_missing(&vault, &FakeEmbedder).expect("embed");
+        let space = space::list(&vault).expect("list")[0].id.clone();
+        let mut lens = LensPolicy::new("Docs", vec![space]);
+        lens.sensitivity_ceiling = Sensitivity::Restricted;
+
+        let evaluated = search_with_lens_evaluated(
+            &vault,
+            &FloorEmbedder(0.2),
+            &lens,
+            "quantum orbital spectroscopy",
+            2,
+        )
+        .expect("query");
+        assert!(evaluated.results.is_empty());
+        assert_eq!(evaluated.diagnostics.relevance_threshold, 0.2);
+        assert_eq!(evaluated.diagnostics.candidates_considered, 2);
+        assert_eq!(evaluated.diagnostics.rejected_below_threshold, 2);
+        assert!(evaluated.diagnostics.best_candidate_score.is_some());
+    }
+
+    #[test]
+    fn model_without_calibration_fails_closed_before_index_access() {
+        struct Uncalibrated;
+        impl EmbeddingProvider for Uncalibrated {
+            fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+                FakeEmbedder.embed(text)
+            }
+            fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+                FakeEmbedder.embed_batch(texts)
+            }
+            fn model_version(&self) -> &str {
+                "uncalibrated@1"
+            }
+            fn dimensions(&self) -> usize {
+                384
+            }
+        }
+
+        let (_dir, vault) = corpus();
+        let lens = LensPolicy::new("Docs", vec![]);
+        let error = search_with_lens_evaluated(&vault, &Uncalibrated, &lens, "anything", 5)
+            .expect_err("unknown calibration must refuse");
+        assert!(
+            matches!(error, SearchError::UncalibratedModel(model) if model == "uncalibrated@1")
+        );
     }
 
     #[test]

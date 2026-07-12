@@ -156,6 +156,9 @@ mod tests {
         fn dimensions(&self) -> usize {
             384
         }
+        fn calibrated_relevance_floor(&self) -> Option<f32> {
+            Some(0.2)
+        }
     }
 
     fn ingest_live(vault: &Vault, space: &SpaceId, dir: &Path, name: &str, body: &str) {

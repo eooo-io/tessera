@@ -248,6 +248,9 @@ mod tests {
         fn dimensions(&self) -> usize {
             384
         }
+        fn calibrated_relevance_floor(&self) -> Option<f32> {
+            Some(0.0)
+        }
     }
 
     struct Fixture {
