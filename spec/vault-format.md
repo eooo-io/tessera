@@ -221,6 +221,12 @@ redirect or resource URI, expiry, and revocation/use state. These tables are
 portable authorization metadata, not encrypted content; no source plaintext or
 raw bearer credential is stored in them.
 
+Migration 0013 adds `pairings.lens_updated_at`, backfills existing pairings to
+the lens revision present at migration, and makes the grant fields immutable
+with a database trigger. Only `revoked_at` may change. Guardian calls compare
+the stored revision with the current lens before disclosure; an edited or
+deleted lens requires a new owner-approved pairing.
+
 ## 7. `inbox/`
 
 Plaintext staging area. Files here are **not part of the vault's data set**:

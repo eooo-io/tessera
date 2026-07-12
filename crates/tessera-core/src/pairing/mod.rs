@@ -19,6 +19,8 @@ pub enum PairingError {
     NotFound(String),
     #[error("unknown lens: {0}")]
     UnknownLens(String),
+    #[error("pairing {pairing_id} was approved for an older revision of lens {lens_id}")]
+    StaleLens { pairing_id: String, lens_id: String },
     #[error("lens error: {0}")]
     Lens(#[from] LensError),
     #[error("vault error: {0}")]
@@ -38,6 +40,9 @@ pub struct Pairing {
     pub approved_at: String,
     pub revoked_at: Option<String>,
     pub oauth_client_id: Option<String>,
+    /// Exact lens revision approved by the owner. A changed lens requires a
+    /// new pairing; an old credential never silently inherits new policy.
+    pub lens_updated_at: Option<String>,
 }
 
 impl Pairing {
@@ -45,10 +50,49 @@ impl Pairing {
     pub fn is_active(&self) -> bool {
         self.revoked_at.is_none()
     }
+
+    /// Whether this pairing still names the exact lens revision the owner
+    /// approved. `None` fails closed for deleted/pre-versioned lens records.
+    pub fn is_current_for(&self, lens: &crate::lens::LensPolicy) -> bool {
+        let current_revision = lens.updated_at.to_rfc3339();
+        self.lens_id == lens.id.0
+            && self.lens_updated_at.as_deref() == Some(current_revision.as_str())
+    }
+
+    /// Compare the immutable authorization fields, excluding revocation state.
+    pub fn same_grant_as(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.lens_id == other.lens_id
+            && self.purpose == other.purpose
+            && self.agent_name == other.agent_name
+            && self.ttl_minutes == other.ttl_minutes
+            && self.approved_at == other.approved_at
+            && self.oauth_client_id == other.oauth_client_id
+            && self.lens_updated_at == other.lens_updated_at
+    }
+}
+
+/// Resolve the exact lens revision authorized by this pairing. Deleted or
+/// edited lenses fail closed and require a new owner-approved pairing.
+pub fn approved_lens(
+    vault: &Vault,
+    pairing: &Pairing,
+) -> Result<crate::lens::LensPolicy, PairingError> {
+    let lens = lens::get(vault, &LensId(pairing.lens_id.clone())).map_err(|error| match error {
+        LensError::NotFound(id) => PairingError::UnknownLens(id),
+        other => PairingError::Lens(other),
+    })?;
+    if !pairing.is_current_for(&lens) {
+        return Err(PairingError::StaleLens {
+            pairing_id: pairing.id.clone(),
+            lens_id: pairing.lens_id.clone(),
+        });
+    }
+    Ok(lens)
 }
 
 const COLS: &str =
-    "id, lens_id, purpose, agent_name, ttl_minutes, approved_at, revoked_at, oauth_client_id";
+    "id, lens_id, purpose, agent_name, ttl_minutes, approved_at, revoked_at, oauth_client_id, lens_updated_at";
 
 fn row_to_pairing(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pairing> {
     Ok(Pairing {
@@ -60,6 +104,7 @@ fn row_to_pairing(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pairing> {
         approved_at: row.get(5)?,
         revoked_at: row.get(6)?,
         oauth_client_id: row.get(7)?,
+        lens_updated_at: row.get(8)?,
     })
 }
 
@@ -104,18 +149,20 @@ fn approve_with_client(
     ttl_minutes: u32,
     oauth_client_id: Option<&str>,
 ) -> Result<Pairing, PairingError> {
-    // The lens must exist at approval time.
-    lens::get(vault, lens_id).map_err(|e| match e {
+    // The exact lens revision is part of the immutable owner grant.
+    let approved_lens = lens::get(vault, lens_id).map_err(|e| match e {
         LensError::NotFound(id) => PairingError::UnknownLens(id),
         other => PairingError::Lens(other),
     })?;
+    let lens_updated_at = approved_lens.updated_at.to_rfc3339();
 
     let id = format!("pair_{}", ulid::Ulid::new());
     let approved_at = chrono::Utc::now().to_rfc3339();
     vault.conn().execute(
         "INSERT INTO pairings
-           (id, lens_id, purpose, agent_name, ttl_minutes, approved_at, oauth_client_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+           (id, lens_id, purpose, agent_name, ttl_minutes, approved_at,
+            oauth_client_id, lens_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             id,
             lens_id.0,
@@ -123,7 +170,8 @@ fn approve_with_client(
             agent_name,
             ttl_minutes,
             approved_at,
-            oauth_client_id
+            oauth_client_id,
+            lens_updated_at
         ],
     )?;
     Ok(Pairing {
@@ -135,6 +183,7 @@ fn approve_with_client(
         approved_at,
         revoked_at: None,
         oauth_client_id: oauth_client_id.map(str::to_owned),
+        lens_updated_at: Some(lens_updated_at),
     })
 }
 
@@ -153,7 +202,10 @@ pub fn find_remote(
         .query_map([oauth_client_id, lens_id], row_to_pairing)?
         .collect::<Result<Vec<_>, _>>()?;
     match matches.as_slice() {
-        [pairing] => Ok(pairing.clone()),
+        [pairing] => {
+            approved_lens(vault, pairing)?;
+            Ok(pairing.clone())
+        }
         [] => Err(PairingError::NotFound(format!(
             "remote approval for client {oauth_client_id} and lens {lens_id}"
         ))),
@@ -231,6 +283,7 @@ mod tests {
 
         let fetched = get(&vault, &p.id).expect("get");
         assert_eq!(fetched, p);
+        assert!(p.lens_updated_at.is_some());
     }
 
     #[test]
@@ -260,5 +313,35 @@ mod tests {
             revoke(&vault, "pair_NOPE"),
             Err(PairingError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn approved_grant_fields_cannot_be_mutated() {
+        let (_dir, vault, lens_id) = vault_with_lens();
+        let p = approve(&vault, &lens_id, "approved purpose", "agent", 30).expect("approve");
+        let error = vault
+            .conn()
+            .execute(
+                "UPDATE pairings SET purpose = 'different task' WHERE id = ?1",
+                [&p.id],
+            )
+            .expect_err("grant mutation must fail");
+        assert!(error.to_string().contains("create a new pairing"));
+
+        revoke(&vault, &p.id).expect("revocation remains allowed");
+        assert!(!get(&vault, &p.id).expect("get").is_active());
+    }
+
+    #[test]
+    fn lens_revision_change_makes_pairing_stale() {
+        let (_dir, vault, lens_id) = vault_with_lens();
+        let p = approve(&vault, &lens_id, "purpose", "agent", 30).expect("approve");
+        let mut policy = lens::get(&vault, &lens_id).expect("lens");
+        assert!(p.is_current_for(&policy));
+
+        policy.allow_metadata = false;
+        lens::update(&vault, &policy).expect("update lens");
+        let changed = lens::get(&vault, &lens_id).expect("changed lens");
+        assert!(!p.is_current_for(&changed));
     }
 }

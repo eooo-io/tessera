@@ -26,6 +26,13 @@ Registration alone grants nothing. Authorization succeeds only for the exact
 separate pairing/new consent. Pairing revocation invalidates existing tokens
 on their next use.
 
+The pairing is also bound to the exact approved lens revision. Editing the
+lens makes existing pairings and tokens stale; the owner must approve a new
+pairing rather than silently expanding or changing an old grant. Purpose is an
+immutable audit declaration, not semantic query enforcement. The complete
+authorization semantics and downstream limits are in
+[`authorization-model.md`](authorization-model.md).
+
 Authorization codes are one-time, expire after five minutes, require S256
 PKCE, and are bound to the client, exact redirect URI, and exact MCP resource.
 Access tokens are opaque, short-lived according to the pairing TTL, and bound

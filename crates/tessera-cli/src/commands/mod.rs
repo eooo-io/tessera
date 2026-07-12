@@ -172,7 +172,7 @@ pub enum LensCommand {
 
 #[derive(Subcommand)]
 pub enum PairCommand {
-    /// Approve a pairing: bind a lens + purpose for an agent to connect
+    /// Approve an immutable lens revision + audit-purpose pairing
     Add {
         /// Lens id the pairing grants access through
         #[arg(long)]
@@ -998,29 +998,45 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     };
                     println!("Approved pairing {}", p.id);
                     println!(
-                        "  lens={}  purpose={:?}  agent={}  ttl={}min  oauth_client={}",
+                        "  lens={}  lens_revision={}  purpose={:?}  agent={}  ttl={}min  oauth_client={}",
                         p.lens_id,
+                        p.lens_updated_at.as_deref().unwrap_or("unavailable"),
                         p.purpose,
                         p.agent_name,
                         p.ttl_minutes,
                         p.oauth_client_id.as_deref().unwrap_or("stdio")
                     );
-                    println!(
-                        "Launch the guardian with: tessera-guardian --vault <path> --pairing {}",
-                        p.id
-                    );
+                    if p.oauth_client_id.is_some() {
+                        println!(
+                            "The registered OAuth client may now request scope lens:{}; editing the lens requires a new pairing.",
+                            p.lens_id
+                        );
+                    } else {
+                        println!(
+                            "Launch the guardian with: tessera-guardian --vault <path> --pairing {}",
+                            p.id
+                        );
+                    }
                     Ok(())
                 }
                 PairCommand::List => {
                     for p in pairing::list(&vault)? {
+                        let status = if !p.is_active() {
+                            "revoked"
+                        } else if pairing::approved_lens(&vault, &p).is_ok() {
+                            "active"
+                        } else {
+                            "stale"
+                        };
                         println!(
-                            "{}  lens={}  purpose={:?}  agent={}  oauth_client={}  {}",
+                            "{}  lens={}  lens_revision={}  purpose={:?}  agent={}  oauth_client={}  {}",
                             p.id,
                             p.lens_id,
+                            p.lens_updated_at.as_deref().unwrap_or("unavailable"),
                             p.purpose,
                             p.agent_name,
                             p.oauth_client_id.as_deref().unwrap_or("stdio"),
-                            if p.is_active() { "active" } else { "revoked" }
+                            status
                         );
                     }
                     Ok(())

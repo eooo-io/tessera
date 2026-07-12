@@ -249,6 +249,20 @@ mod tests {
     }
 
     #[test]
+    fn pairing_reuse_creates_distinct_sessions_with_same_grant_snapshot() {
+        let (_dir, vault, p) = vault_with_pairing(60);
+        let first = start(&vault, &p).expect("first");
+        let second = start(&vault, &p).expect("second");
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.pairing_id, second.pairing_id);
+        assert_eq!(first.lens_id, p.lens_id);
+        assert_eq!(first.purpose, p.purpose);
+        assert_eq!(first.agent_name, p.agent_name);
+        assert_eq!(first.effective_status(), SessionStatus::Active);
+        assert_eq!(second.effective_status(), SessionStatus::Active);
+    }
+
+    #[test]
     fn zero_ttl_is_immediately_expired() {
         let (_dir, vault, p) = vault_with_pairing(0);
         let s = start(&vault, &p).expect("start");

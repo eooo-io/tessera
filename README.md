@@ -13,7 +13,7 @@
 
 A Mac-first personal context vault with policy-gated semantic retrieval — the trust substrate for agentic AI.
 
-Tessera lets you curate what matters, then grant AI agents permission to access only what they need for a specific task — with full auditability through receipts that prove what was accessed and what was disclosed. The name draws from the Roman *tessera*: a physical token that proved specific access had been granted, for a specific purpose, by a specific authority.
+Tessera lets you curate what matters, then grant AI agents a narrow, owner-approved lens with exact disclosure receipts. The declared purpose is audit context, not a semantic firewall. The name draws from the Roman *tessera*: a physical token that represented specific access granted by a specific authority.
 
 ## Core Principles
 
@@ -38,8 +38,8 @@ A **SwiftUI Mac app** (`mac/`) provides the desktop interface for spaces, lens b
 - **Spaces** — Hierarchical containers for organizing artifacts
 - **Artifacts** — Files/documents with metadata, tags, and version history
 - **Lenses** — Reusable access policies defining what an agent can see and how
-- **Sessions** — Time-bounded, purpose-declared access grants for agents
-- **Receipts** — Immutable records of what was accessed during a session
+- **Sessions** — Time-bounded uses of an immutable pairing and lens revision
+- **Receipts** — Hash-chained records of what Tessera accessed and disclosed
 
 ## Development
 
@@ -65,6 +65,12 @@ Remote MCP uses the published `2025-11-25` Streamable HTTP/OAuth contract,
 binds loopback by default, and requires an owner pairing for the exact OAuth
 client and lens. Setup and TLS-boundary guidance are in
 [`docs/http-oauth.md`](docs/http-oauth.md).
+
+Purpose, identity, pairing reuse, lens changes, expiry, and revocation have
+deliberately narrow semantics. In particular, purpose is recorded but not
+semantically enforced, stdio identity is local configuration trust rather than
+attestation, and revocation cannot retract prior disclosure. See
+[`docs/authorization-model.md`](docs/authorization-model.md).
 
 ## Quarantine review
 

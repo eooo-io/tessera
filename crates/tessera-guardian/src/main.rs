@@ -1,14 +1,13 @@
 //! tessera-guardian — the vault's enforcement point: MCP server for agent access.
 //!
-//! Launched by an MCP client (Claude Desktop / Claude Code) with a `--pairing`
-//! the owner approved via `tessera pair add`. The pairing binds a lens and a
-//! purpose; the guardian refuses to serve any pairing that is unknown, revoked,
-//! or references a missing lens. It then speaks MCP over stdio.
+//! Stdio clients present an owner-approved `--pairing`; HTTP clients use OAuth
+//! with a pairing bound to their registered client id. The immutable grant
+//! binds an exact lens revision, declared audit purpose, agent label, and TTL.
+//! Unknown, revoked, deleted-lens, or stale-lens grants fail closed.
 
 mod mcp;
 mod session;
 
-// Retained for the HTTP transport + OAuth work (M6 #34).
 mod agent;
 mod auth;
 mod routes;
