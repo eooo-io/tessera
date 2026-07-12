@@ -132,6 +132,39 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_migration_transaction_leaves_no_schema_or_ledger_fragment() {
+        let (_dir, conn) = open_temp();
+        conn.execute_batch("BEGIN").expect("begin fault fixture");
+        conn.execute_batch("CREATE TABLE interrupted_migration_fixture (id INTEGER)")
+            .expect("partial schema");
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at)
+             VALUES (999, 'fault_fixture', datetime('now'))",
+            [],
+        )
+        .expect("partial ledger");
+        let interrupted = conn.execute_batch("THIS IS NOT VALID SQL");
+        assert!(interrupted.is_err());
+        conn.execute_batch("ROLLBACK").expect("rollback");
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'interrupted_migration_fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table count");
+        let ledger_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 999",
+                [],
+                |row| row.get(0),
+            )
+            .expect("ledger count");
+        assert_eq!((table_count, ledger_count), (0, 0));
+    }
+
+    #[test]
     fn schema_version_matches_migration_count() {
         let (_dir, conn) = open_temp();
         let version = migrations::schema_version(&conn).expect("version");

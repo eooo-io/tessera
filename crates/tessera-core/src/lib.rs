@@ -16,6 +16,7 @@ pub mod oauth;
 pub mod pairing;
 pub mod provenance;
 pub mod receipt;
+pub mod recovery;
 pub mod review;
 pub mod search;
 pub mod session;
