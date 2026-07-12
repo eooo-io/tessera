@@ -24,6 +24,51 @@ use crate::session::GuardianSession;
 
 /// MCP protocol revision this server speaks.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    let mut oversized = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if line.is_empty() && !oversized {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map(|index| index + 1).unwrap_or(available.len());
+        let payload_len = newline.unwrap_or(available.len());
+        if !oversized {
+            if line.len() + payload_len > max_bytes {
+                oversized = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&available[..payload_len]);
+            }
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if oversized {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("request exceeds {max_bytes} byte limit"),
+        ));
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "request is not UTF-8"))
+}
 
 /// Handle one authenticated Streamable HTTP JSON-RPC message. HTTP requests
 /// are stateless at the transport layer; each disclosing tool call receives a
@@ -145,9 +190,20 @@ pub fn serve_stdio(
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            if input_tx.send(line).is_err() {
-                break;
+        let mut input = stdin.lock();
+        loop {
+            match read_bounded_line(&mut input, MAX_MESSAGE_BYTES) {
+                Ok(Some(line)) => {
+                    if input_tx.send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    if input_tx.send(Err(error)).is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -204,6 +260,17 @@ pub fn serve_stdio(
         }
         let poll = idle_remaining.min(Duration::from_secs(1));
         let line = match input_rx.recv_timeout(poll) {
+            Ok(Err(input_error)) if input_error.kind() == std::io::ErrorKind::InvalidData => {
+                write_message(
+                    &mut out,
+                    error(
+                        Value::Null,
+                        -32600,
+                        &format!("invalid request: {input_error}"),
+                    ),
+                )?;
+                continue;
+            }
             Ok(line) => {
                 if live_session::lock_generation(vault)? != unlock_generation {
                     tracing::info!(session = %session_id, "owner lock signal observed; locking vault");
@@ -405,18 +472,22 @@ pub fn serve_stdio(
 
     // On any exit — EOF, revocation, or expiry — finalize the receipt (if
     // anything worth recording happened, incl. rate-limit events) and seal it.
-    let receipt_id = if receipt.has_activity() {
-        let finalized = receipt
+    let finalized = if receipt.has_activity() {
+        receipt
             .finalize()
-            .map_err(|e| anyhow::anyhow!("finalizing receipt: {e}"))?;
-        tracing::info!(receipt = %finalized.receipt_id, "receipt finalized");
-        Some(finalized.receipt_id)
+            .map(|receipt| {
+                tracing::info!(receipt = %receipt.receipt_id, "receipt finalized");
+                Some(receipt.receipt_id)
+            })
+            .map_err(|e| anyhow::anyhow!("finalizing receipt: {e}"))
     } else {
-        None
+        Ok(None)
     };
+    let receipt_id = finalized.as_ref().ok().and_then(|id| id.as_deref());
     // Best-effort close (a no-op if already revoked — that status is preserved).
-    let _ = live_session::close(vault, &session_id, receipt_id.as_deref());
+    let _ = live_session::close(vault, &session_id, receipt_id);
     tracing::info!(session = %session_id, "guardian session ended");
+    finalized?;
     Ok(())
 }
 
@@ -454,4 +525,22 @@ fn write_message(out: &mut impl Write, message: Value) -> std::io::Result<()> {
         serde_json::to_string(&message).expect("serialize json-rpc")
     )?;
     out.flush()
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_reader_drains_oversized_line_and_resumes_at_next_message() {
+        let input = format!("{}\n{{\"id\":2}}\r\n", "x".repeat(9));
+        let mut reader = std::io::Cursor::new(input.into_bytes());
+        let error = read_bounded_line(&mut reader, 8).expect_err("oversized");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_bounded_line(&mut reader, 32).expect("next line"),
+            Some("{\"id\":2}".into())
+        );
+        assert_eq!(read_bounded_line(&mut reader, 32).expect("eof"), None);
+    }
 }

@@ -670,6 +670,33 @@ mod tests {
             .expect("access token")
             .to_owned();
 
+        let unsupported_refresh = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "refresh_token")
+            .append_pair("code", "not-a-refresh-token")
+            .append_pair("redirect_uri", "http://127.0.0.1:9911/callback")
+            .append_pair("client_id", &client_id)
+            .append_pair("code_verifier", verifier)
+            .append_pair("resource", "https://tessera.example/mcp")
+            .finish();
+        let refresh_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/token")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(unsupported_refresh))
+                    .unwrap(),
+            )
+            .await
+            .expect("unsupported refresh");
+        assert_eq!(refresh_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refresh_response.headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(json_body(refresh_response).await["error"], "invalid_grant");
+
         let initialize = app
             .clone()
             .oneshot(
@@ -796,6 +823,21 @@ mod tests {
         assert!(unauthenticated
             .headers()
             .contains_key(header::WWW_AUTHENTICATE));
+
+        let oversized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b'x'; mcp::MAX_MESSAGE_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await
+            .expect("oversized HTTP request");
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let get_without_sse = app
             .clone()

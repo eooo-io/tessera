@@ -61,5 +61,16 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
+      - name: Cache pinned embedding model
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Application Support/tessera/models
+            ~/.local/share/tessera/models
+          key: ${{ runner.os }}-tessera-model-${{ hashFiles('spec/model-manifests/*.json') }}
+
+      - name: Provision pinned embedding model
+        run: cargo run -p tessera-cli -- model fetch
+
       - name: Test
         run: cargo test --all-targets

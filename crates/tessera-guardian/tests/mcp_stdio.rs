@@ -2,7 +2,7 @@
 //! JSON-RPC handshake, and verify that sessions are refused for bad pairings.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::Value;
 use tessera_core::artifact::ArtifactState;
@@ -58,6 +58,67 @@ fn guardian(vault: &std::path::Path, pairing: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     cmd
+}
+
+fn guardian_without_model(vault: &std::path::Path, pairing: &str) -> Command {
+    let mut command = guardian(vault, pairing);
+    command.env(
+        "TESSERA_MODEL_DIR",
+        vault
+            .parent()
+            .expect("vault parent")
+            .join("missing-model-root"),
+    );
+    command
+}
+
+struct StdioClient {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+}
+
+impl StdioClient {
+    fn start(vault: &std::path::Path, pairing_id: &str) -> Self {
+        Self::from_command(guardian(vault, pairing_id))
+    }
+
+    fn start_without_model(vault: &std::path::Path, pairing_id: &str) -> Self {
+        Self::from_command(guardian_without_model(vault, pairing_id))
+    }
+
+    fn from_command(mut command: Command) -> Self {
+        let mut child = command.spawn().expect("spawn guardian");
+        let input = child.stdin.take().expect("stdin");
+        let output = BufReader::new(child.stdout.take().expect("stdout"));
+        Self {
+            child,
+            input,
+            output,
+        }
+    }
+
+    fn request(&mut self, request: Value) -> Value {
+        writeln!(self.input, "{request}").expect("request");
+        self.input.flush().expect("flush");
+        let mut line = String::new();
+        self.output.read_line(&mut line).expect("response");
+        serde_json::from_str(&line).expect("json-rpc response")
+    }
+
+    fn close(mut self) -> std::process::ExitStatus {
+        drop(self.input);
+        self.child.wait().expect("guardian exit")
+    }
+}
+
+fn tool_call(id: u64, name: &str, arguments: Value) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments }
+    })
 }
 
 #[test]
@@ -140,6 +201,51 @@ fn tools_list_and_ping_after_initialize() {
 }
 
 #[test]
+fn malformed_and_oversized_requests_fail_cleanly_without_killing_stdio_session() {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "protocol test", "agent", 60).expect("approve");
+    drop(vault);
+
+    let mut child = guardian(&path, &pairing.id).spawn().expect("spawn");
+    let mut input = child.stdin.take().expect("stdin");
+    input.write_all(b"{not-json}\n").expect("malformed");
+    input
+        .write_all(&vec![b'x'; 1024 * 1024 + 1])
+        .expect("oversized body");
+    input.write_all(b"\n").expect("oversized delimiter");
+    input
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
+              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/unknown\"}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+        )
+        .expect("valid continuation");
+    drop(input);
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages: Vec<Value> = String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json-rpc"))
+        .collect();
+    assert_eq!(messages.len(), 4, "two errors and two request responses");
+    assert_eq!(messages[0]["error"]["code"], -32700);
+    assert_eq!(messages[1]["error"]["code"], -32600);
+    assert!(messages[1]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("1048576 byte limit"));
+    assert_eq!(messages[2]["id"], 1);
+    assert_eq!(messages[3]["id"], 2);
+}
+
+#[test]
 fn session_refused_for_unknown_pairing() {
     let (_dir, path, _lens) = vault_with_lens();
     let output = guardian(&path, "pair_DOESNOTEXIST").output().expect("run");
@@ -148,6 +254,26 @@ fn session_refused_for_unknown_pairing() {
     assert!(
         stderr.contains("not authorized") || stderr.contains("pair_DOESNOTEXIST"),
         "stderr should explain the refusal: {stderr}"
+    );
+}
+
+#[test]
+fn http_non_loopback_bind_requires_explicit_owner_opt_in() {
+    let (_dir, path, _lens) = vault_with_lens();
+    let mut command = guardian(&path, "unused-for-http");
+    let output = command
+        .args([
+            "--http",
+            "--bind",
+            "0.0.0.0:0",
+            "--public-url",
+            "https://tessera.example",
+        ])
+        .output()
+        .expect("guardian");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pass --allow-non-loopback explicitly")
     );
 }
 
@@ -354,6 +480,241 @@ fn vault_with_live_doc(
     let lens_id = lens::create(&vault, &lens).expect("lens");
     drop(vault);
     (dir, path, lens_id, art)
+}
+
+fn vault_with_isolated_lenses() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    LensId,
+    ArtifactId,
+    LensId,
+    ArtifactId,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("Isolated.tessera");
+    let vault = Vault::create_with_params(&path, "pass", &TEST_PARAMS).expect("create");
+    let alpha = space::create(&vault, "Alpha Private", None).expect("alpha");
+    let beta = space::create(&vault, "Beta Private", None).expect("beta");
+    let ingest = |space_id: &SpaceId, filename: &str, body: &str| {
+        let source = dir.path().join(filename);
+        std::fs::write(&source, body).expect("write");
+        inbox::add(&vault, std::slice::from_ref(&source)).expect("add");
+        let artifact = inbox::process(&vault, space_id).expect("process").ingested[0]
+            .1
+            .clone();
+        let derived = extract::extract_text(&vault, &artifact)
+            .expect("extract")
+            .expect("text");
+        chunk::chunk_derived_text(&vault, &derived, &chunk::ChunkParams::default()).expect("chunk");
+        summary::generate(&vault, &artifact, false).expect("summary");
+        tessera_core::artifact::set_state(&vault, &artifact, ArtifactState::Live).expect("live");
+        artifact
+    };
+    let alpha_artifact = ingest(&alpha, "alpha.md", "ALPHA-ONLY-EVIDENCE-714");
+    let beta_artifact = ingest(&beta, "beta.md", "BETA-ONLY-EVIDENCE-928");
+    let embedder =
+        tessera_core::embed::OnnxEmbedder::load(&tessera_core::embed::onnx::default_model_dir())
+            .expect("pinned integration model; run `tessera model fetch`");
+    tessera_core::search::embed_missing(&vault, &embedder).expect("embed corpus");
+    let make_lens = |name: &str, space_id: SpaceId, max_qpm: u32| {
+        let mut policy = LensPolicy::new(name, vec![space_id]);
+        policy.disclosure_mode = DisclosureMode::Excerpt;
+        policy.max_quote_chars = Some(500);
+        policy.sensitivity_ceiling = tessera_core::Sensitivity::Restricted;
+        policy.max_queries_per_min = Some(max_qpm);
+        lens::create(&vault, &policy).expect("lens")
+    };
+    let alpha_lens = make_lens("Alpha lens", alpha, 3);
+    let beta_lens = make_lens("Beta lens", beta, 5);
+    drop(vault);
+    (
+        dir,
+        path,
+        alpha_lens,
+        alpha_artifact,
+        beta_lens,
+        beta_artifact,
+    )
+}
+
+#[test]
+fn concurrent_stdio_clients_preserve_two_lens_isolation_and_reverse_finalization() {
+    let (_dir, path, alpha_lens, alpha_artifact, beta_lens, beta_artifact) =
+        vault_with_isolated_lenses();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let alpha_pairing = pairing::approve(&vault, &alpha_lens, "alpha purpose", "Alpha Agent", 60)
+        .expect("alpha pairing");
+    let beta_pairing = pairing::approve(&vault, &beta_lens, "beta purpose", "Beta Agent", 30)
+        .expect("beta pairing");
+    drop(vault);
+
+    let mut alpha = StdioClient::start(&path, &alpha_pairing.id);
+    let alpha_init = alpha.request(serde_json::json!({
+        "jsonrpc":"2.0", "id":1, "method":"initialize", "params":{}
+    }));
+    let mut beta = StdioClient::start(&path, &beta_pairing.id);
+    let beta_init = beta.request(serde_json::json!({
+        "jsonrpc":"2.0", "id":1, "method":"initialize", "params":{}
+    }));
+    assert!(alpha_init["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("Alpha lens"));
+    assert!(beta_init["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("Beta lens"));
+
+    let alpha_spaces = alpha.request(tool_call(2, "vault_list_spaces", serde_json::json!({})));
+    let beta_spaces = beta.request(tool_call(2, "vault_list_spaces", serde_json::json!({})));
+    let alpha_spaces = alpha_spaces.to_string();
+    let beta_spaces = beta_spaces.to_string();
+    assert!(alpha_spaces.contains("Alpha Private"));
+    assert!(!alpha_spaces.contains("Beta Private"));
+    assert!(beta_spaces.contains("Beta Private"));
+    assert!(!beta_spaces.contains("Alpha Private"));
+
+    let alpha_allowed = alpha.request(tool_call(
+        3,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &alpha_artifact.0}),
+    ));
+    assert!(alpha_allowed
+        .to_string()
+        .contains("ALPHA-ONLY-EVIDENCE-714"));
+    let alpha_guess = alpha.request(tool_call(
+        4,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &beta_artifact.0}),
+    ));
+    assert_eq!(alpha_guess["result"]["isError"], true);
+    assert!(!alpha_guess.to_string().contains("BETA-ONLY-EVIDENCE-928"));
+    let alpha_semantic = alpha.request(tool_call(
+        5,
+        "vault_query",
+        serde_json::json!({"query":"ALPHA-ONLY-EVIDENCE-714"}),
+    ));
+    assert!(alpha_semantic
+        .to_string()
+        .contains("ALPHA-ONLY-EVIDENCE-714"));
+    assert!(!alpha_semantic
+        .to_string()
+        .contains("BETA-ONLY-EVIDENCE-928"));
+    let alpha_limited = alpha.request(tool_call(
+        6,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &alpha_artifact.0}),
+    ));
+    assert!(alpha_limited.to_string().contains("rate_limited"));
+
+    let beta_allowed = beta.request(tool_call(
+        3,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &beta_artifact.0}),
+    ));
+    assert!(beta_allowed.to_string().contains("BETA-ONLY-EVIDENCE-928"));
+    let beta_guess = beta.request(tool_call(
+        4,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &alpha_artifact.0}),
+    ));
+    assert_eq!(beta_guess["result"]["isError"], true);
+    assert!(!beta_guess.to_string().contains("ALPHA-ONLY-EVIDENCE-714"));
+    let beta_semantic = beta.request(tool_call(
+        5,
+        "vault_query",
+        serde_json::json!({"query":"BETA-ONLY-EVIDENCE-928"}),
+    ));
+    assert!(beta_semantic.to_string().contains("BETA-ONLY-EVIDENCE-928"));
+    assert!(!beta_semantic
+        .to_string()
+        .contains("ALPHA-ONLY-EVIDENCE-714"));
+    let beta_still_allowed = beta.request(tool_call(
+        6,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &beta_artifact.0}),
+    ));
+    assert!(beta_still_allowed
+        .to_string()
+        .contains("BETA-ONLY-EVIDENCE-928"));
+
+    // Open order was Alpha then Beta; close in reverse order.
+    assert!(beta.close().success());
+    assert!(alpha.close().success());
+
+    let vault = Vault::open(&path, "pass").expect("verify");
+    assert_eq!(receipt::verify(&vault).expect("chain"), 2);
+    let receipts = receipt::list(&vault).expect("receipts");
+    assert_eq!(receipts[0].lens.lens_id, beta_lens.0);
+    assert_eq!(receipts[0].purpose, "beta purpose");
+    assert_eq!(receipts[0].summary.total_queries, 3);
+    assert_eq!(receipts[1].lens.lens_id, alpha_lens.0);
+    assert_eq!(receipts[1].purpose, "alpha purpose");
+    assert_eq!(receipts[1].summary.total_queries, 2);
+    assert_eq!(receipts[1].rate_limit_events.len(), 1);
+    let sessions = session::list(&vault).expect("sessions");
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions.iter().all(|record| record.receipt_id.is_some()));
+}
+
+#[test]
+fn unavailable_model_is_a_bounded_tool_error_and_session_can_disconnect_cleanly() {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "model failure", "agent", 60).expect("pairing");
+    drop(vault);
+    let mut client = StdioClient::start_without_model(&path, &pairing.id);
+    client.request(serde_json::json!({
+        "jsonrpc":"2.0", "id":1, "method":"initialize", "params":{}
+    }));
+    let response = client.request(tool_call(
+        2,
+        "vault_query",
+        serde_json::json!({"query":"anything"}),
+    ));
+    assert_eq!(response["result"]["isError"], true);
+    assert!(response.to_string().contains("model_unavailable"));
+    assert!(client.close().success());
+    let vault = Vault::open(&path, "pass").expect("verify");
+    assert_eq!(receipt::verify(&vault).expect("no disclosure receipt"), 0);
+    assert_eq!(session::list(&vault).expect("session").len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn receipt_finalization_permission_failure_closes_session_and_preserves_valid_chain() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, path, lens_id, artifact) = vault_with_live_doc(None);
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing = pairing::approve(&vault, &lens_id, "failure path", "agent", 60).expect("pairing");
+    drop(vault);
+    let mut client = StdioClient::start(&path, &pairing.id);
+    client.request(serde_json::json!({
+        "jsonrpc":"2.0", "id":1, "method":"initialize", "params":{}
+    }));
+    let disclosed = client.request(tool_call(
+        2,
+        "vault_get_item",
+        serde_json::json!({"artifact_id": &artifact.0}),
+    ));
+    assert!(disclosed["result"]["isError"].is_null());
+
+    let receipts_dir = path.join("receipts");
+    std::fs::set_permissions(&receipts_dir, std::fs::Permissions::from_mode(0o500))
+        .expect("deny receipt write");
+    let status = client.close();
+    std::fs::set_permissions(&receipts_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("restore receipt permissions");
+    assert!(!status.success(), "receipt write failure must be loud");
+
+    let vault = Vault::open(&path, "pass").expect("verify");
+    assert_eq!(receipt::verify(&vault).expect("chain remains valid"), 0);
+    let sessions = session::list(&vault).expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].effective_status(), SessionStatus::Closed);
+    assert!(sessions[0].receipt_id.is_none());
 }
 
 #[test]
