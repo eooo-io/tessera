@@ -22,6 +22,21 @@ use crate::search::SearchResult;
 use crate::summary::{self, SummaryError};
 use crate::vault::{Vault, VaultError};
 
+/// Absolute byte ceiling for summary/excerpt text returned to an agent in one
+/// evidence item. Full disclosure is a separately gated owner capability.
+pub const MAX_AGENT_TEXT_BYTES: usize = 64 * 1024;
+
+fn bounded_text(text: &str, max_chars: usize) -> String {
+    let mut output = String::with_capacity(text.len().min(MAX_AGENT_TEXT_BYTES));
+    for character in text.chars().take(max_chars) {
+        if output.len() + character.len_utf8() > MAX_AGENT_TEXT_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
 #[derive(Error, Debug)]
 pub enum DisclosureError {
     #[error("no summary available for {0} — generate one first")]
@@ -46,10 +61,34 @@ pub enum DisclosureError {
     Database(#[from] rusqlite::Error),
 }
 
+/// Semantic type of disclosed evidence. Historical code and tool events are
+/// data classifications only; they never authorize execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceContentKind {
+    DocumentText,
+    HistoricalMessage,
+    HistoricalCode,
+    HistoricalToolCall,
+    HistoricalToolResult,
+}
+
+impl EvidenceContentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DocumentText => "document_text",
+            Self::HistoricalMessage => "historical_message",
+            Self::HistoricalCode => "historical_code",
+            Self::HistoricalToolCall => "historical_tool_call",
+            Self::HistoricalToolResult => "historical_tool_result",
+        }
+    }
+}
+
 /// What an agent actually receives for one retrieval hit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedContext {
     pub artifact_id: ArtifactId,
+    pub content_kind: EvidenceContentKind,
     /// Present only when the lens allows metadata.
     pub title: Option<String>,
     /// The mode actually applied — may be a fail-closed downgrade of the lens's
@@ -90,8 +129,10 @@ pub fn render(
         DisclosureMode::Summary => {
             let body = summary::get_summary_text(vault, &result.artifact_id)?
                 .ok_or_else(|| DisclosureError::NoSummary(result.artifact_id.0.clone()))?;
+            let body = bounded_text(&body, usize::MAX);
             Ok(RenderedContext {
                 artifact_id: result.artifact_id.clone(),
+                content_kind: EvidenceContentKind::DocumentText,
                 title,
                 mode,
                 body,
@@ -109,10 +150,11 @@ pub fn render(
             // Truncate to at most max_quote_chars CHARACTERS — taking whole
             // chars is inherently UTF-8-boundary-safe.
             let max = lens.max_quote_chars.unwrap_or(u32::MAX) as usize;
-            let excerpt: String = slice.chars().take(max).collect();
+            let excerpt = bounded_text(slice, max);
             let bytes = excerpt.len() as u64;
             Ok(RenderedContext {
                 artifact_id: result.artifact_id.clone(),
+                content_kind: EvidenceContentKind::DocumentText,
                 title,
                 mode,
                 body: excerpt,
@@ -126,6 +168,7 @@ pub fn render(
             let bytes = derived.len() as u64;
             Ok(RenderedContext {
                 artifact_id: result.artifact_id.clone(),
+                content_kind: EvidenceContentKind::DocumentText,
                 title,
                 mode,
                 body: derived,
@@ -204,8 +247,10 @@ pub fn render_item(
         DisclosureMode::Summary => {
             let body = summary::get_summary_text(vault, artifact_id)?
                 .ok_or_else(|| DisclosureError::NoSummary(artifact_id.0.clone()))?;
+            let body = bounded_text(&body, usize::MAX);
             Ok(RenderedContext {
                 artifact_id: artifact_id.clone(),
+                content_kind: EvidenceContentKind::DocumentText,
                 title,
                 mode,
                 body,
@@ -217,10 +262,11 @@ pub fn render_item(
         DisclosureMode::Excerpt => {
             let derived = read_artifact_derived(vault, artifact_id)?;
             let max = lens.max_quote_chars.unwrap_or(u32::MAX) as usize;
-            let excerpt: String = derived.chars().take(max).collect();
+            let excerpt = bounded_text(&derived, max);
             let bytes = excerpt.len() as u64;
             Ok(RenderedContext {
                 artifact_id: artifact_id.clone(),
+                content_kind: EvidenceContentKind::DocumentText,
                 title,
                 mode,
                 body: excerpt,
@@ -234,6 +280,7 @@ pub fn render_item(
             let bytes = derived.len() as u64;
             Ok(RenderedContext {
                 artifact_id: artifact_id.clone(),
+                content_kind: EvidenceContentKind::DocumentText,
                 title,
                 mode,
                 body: derived,
@@ -396,6 +443,21 @@ mod tests {
         );
         assert_eq!(rc.bytes_disclosed, rc.body.len() as u64);
         assert_eq!(rc.disclosed_range, Some((0, rc.bytes_disclosed)));
+    }
+
+    #[test]
+    fn agent_excerpt_has_a_utf8_safe_absolute_byte_ceiling() {
+        let source = "🔥".repeat((MAX_AGENT_TEXT_BYTES / 4) + 100);
+        let (_dir, vault, result, _) = fixture(&source);
+        let lens = permissive_lens(DisclosureMode::Excerpt);
+        let rendered = render_item(&vault, &lens, &result.artifact_id, false).expect("render");
+        assert_eq!(rendered.body.len(), MAX_AGENT_TEXT_BYTES);
+        assert!(rendered.body.is_char_boundary(rendered.body.len()));
+        assert_eq!(rendered.bytes_disclosed, MAX_AGENT_TEXT_BYTES as u64);
+        assert_eq!(
+            rendered.disclosed_range,
+            Some((0, MAX_AGENT_TEXT_BYTES as u64))
+        );
     }
 
     #[test]
