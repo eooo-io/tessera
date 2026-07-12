@@ -37,25 +37,33 @@ pub fn serve_stdio(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
+    // Register the persisted live session first. The receipt is bound to this
+    // exact identity; generating a second synthetic session id would make the
+    // audit record impossible to correlate with revocation and expiry state.
+    let live = live_session::start(vault, &session.pairing)
+        .map_err(|e| anyhow::anyhow!("starting session: {e}"))?;
+    let session_id = live.id.clone();
+
     // The connection IS a receipt session; every disclosure is journaled.
     let agent = receipt::AgentRef {
         agent_id: session.pairing.id.clone(),
         name: session.pairing.agent_name.clone(),
     };
-    let mut receipt = receipt::Session::open(
+    let mut receipt = receipt::Session::open_bound(
         vault,
         agent,
         &session.lens,
         session.pairing.purpose.clone(),
         false, // full disclosure stays disabled over stdio (M6 #32/#34 may gate it)
+        receipt::SessionBinding {
+            session_id: session_id.clone(),
+            pairing_id: Some(session.pairing.id.clone()),
+        },
     )
-    .map_err(|e| anyhow::anyhow!("opening receipt session: {e}"))?;
-
-    // Register the live session so the owner's CLI can revoke it and so it
-    // expires at its TTL. Status is re-checked on every tool call.
-    let live = live_session::start(vault, &session.pairing)
-        .map_err(|e| anyhow::anyhow!("starting session: {e}"))?;
-    let session_id = live.id;
+    .map_err(|e| {
+        let _ = live_session::close(vault, &session_id, None);
+        anyhow::anyhow!("opening receipt session: {e}")
+    })?;
 
     let mut embedder: Option<Box<dyn EmbeddingProvider>> = None;
     // Timestamps of accepted disclosing calls, for the rolling-window limiter.

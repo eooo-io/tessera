@@ -152,11 +152,33 @@ Writes are atomic (temp file + rename). Implemented in
 
 ## 6. `receipts/`
 
-One JSON file per finalized receipt, named by receipt id. Each finalized
-receipt embeds the BLAKE3 hash of the previous finalized receipt, forming a
-per-vault tamper-evident chain. Schema: `spec/receipt.schema.json`.
+One JSON file per finalized receipt, named `<receipt_id>.json`. Each finalized
+receipt embeds its contiguous `seq`, the BLAKE3 hash of the previous finalized
+receipt (`prev_receipt_hash`), and a BLAKE3 hash of its own canonical JSON with
+`self_hash` cleared. This is an internally consistent tamper-evident chain; it
+is not a signature or an external trust anchor. Schema:
+`spec/receipt.schema.json`.
 
-*Status: chain fields not yet implemented; completed in M5.*
+New receipts use `schema_version: 2`. A v2 receipt binds the persisted Guardian
+`session_id`, applicable `pairing_id`, and the complete effective lens-policy
+snapshot plus its BLAKE3 hash. Every disclosed result records:
+
+- access kind (`semantic_query` or `direct_item`), artifact and exact artifact
+  version;
+- exact encrypted evidence blob plus `[start, end)` byte range and BLAKE3 hash
+  of the bytes actually returned;
+- derived-text/chunk or summary identity and its provenance records;
+- requested and applied disclosure modes, returned/source byte counts, and
+  whether metadata/full disclosure were allowed;
+- for semantic retrieval, rank, score, and embedding model
+  name/version/dimensions.
+
+`tessera receipts verify` recomputes the chain, policy hash, source
+relationships, provenance references, embedding-model binding, and exact
+disclosed-content hashes from the unlocked vault. Receipts without a
+`schema_version` are legacy v1 records: they remain readable and their original
+hash chain remains verifiable, but they cannot be upgraded into exact-disclosure
+evidence because the missing source coordinates were never recorded.
 
 ## 7. `inbox/`
 

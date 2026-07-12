@@ -290,11 +290,16 @@ fn revoked_session_refuses_next_call_and_finalizes_receipt() {
         1,
         "receipt finalized"
     );
+    let finalized = receipt::list(&vault).expect("list");
+    assert_eq!(finalized[0].summary.total_queries, 1);
     assert_eq!(
-        receipt::list(&vault).expect("list")[0]
-            .summary
-            .total_queries,
-        1
+        finalized[0].session_id, live.id,
+        "receipt must use the persisted Guardian live-session identity"
+    );
+    assert_eq!(
+        finalized[0].pairing_id.as_deref(),
+        Some(p.id.as_str()),
+        "receipt must bind the owner-approved pairing"
     );
 }
 
