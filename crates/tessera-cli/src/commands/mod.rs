@@ -102,6 +102,9 @@ pub enum Command {
         /// Recall@10 gate threshold
         #[arg(long, default_value_t = 0.70)]
         gate: f64,
+        /// Write a sanitized aggregate report (private-eval-v1 plans only)
+        #[arg(long)]
+        report: Option<std::path::PathBuf>,
     },
     /// Manage local models
     Model {
@@ -1127,10 +1130,40 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Eval { golden, gate } => {
+        Command::Eval {
+            golden,
+            gate,
+            report,
+        } => {
             let vault = open_vault(&vault_path)?;
             let embedder = load_embedder()?;
-            let items = tessera_core::eval::parse_golden(&std::fs::read_to_string(&golden)?)?;
+            let source = std::fs::read_to_string(&golden)?;
+            let value: serde_json::Value = serde_json::from_str(&source)?;
+            if value["schema_version"] == "private-eval-v1" {
+                let plan = tessera_core::eval::private::parse_plan(&source)?;
+                let plan_checksum = blake3::hash(source.as_bytes()).to_hex().to_string();
+                let private_report =
+                    tessera_core::eval::private::run(&vault, &embedder, &plan, plan_checksum)?;
+                let json = serde_json::to_string_pretty(&private_report)?;
+                if let Some(path) = report {
+                    std::fs::write(&path, &json)?;
+                    eprintln!("sanitized report written to {}", path.display());
+                }
+                println!("{json}");
+                if private_report.recommendation
+                    != tessera_core::eval::private::Recommendation::Proceed
+                {
+                    bail!(
+                        "private evaluation gate {:?}: thresholds were not all satisfied",
+                        private_report.recommendation
+                    );
+                }
+                return Ok(());
+            }
+            if report.is_some() {
+                bail!("--report is only valid for a private-eval-v1 plan");
+            }
+            let items = tessera_core::eval::parse_golden(&source)?;
             let report = tessera_core::eval::run(
                 &vault,
                 &embedder,

@@ -1,5 +1,7 @@
 //! Golden-set retrieval evaluation — the instrument for the v0.0 gate.
 
+pub mod private;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -18,6 +20,14 @@ pub enum EvalError {
     Search(#[from] SearchError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("private evaluation plan invalid: {0}")]
+    InvalidPlan(String),
+    #[error("lens error: {0}")]
+    Lens(#[from] crate::lens::LensError),
+    #[error("receipt error: {0}")]
+    Receipt(#[from] crate::receipt::ReceiptError),
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
 }
 
 /// One golden question: the query and the filenames of artifacts that a
