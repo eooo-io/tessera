@@ -179,6 +179,16 @@ pub fn set_state(
     artifact: &ArtifactId,
     state: ArtifactState,
 ) -> Result<(), ArtifactError> {
+    set_state_by(vault, artifact, state, "owner")
+}
+
+/// Change quarantine state and record the concrete owner/reviewer action.
+pub fn set_state_by(
+    vault: &Vault,
+    artifact: &ArtifactId,
+    state: ArtifactState,
+    actor: &str,
+) -> Result<(), ArtifactError> {
     let conn = vault.conn();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -200,13 +210,14 @@ pub fn set_state(
         )?;
         conn.execute(
             "INSERT INTO state_transitions (id, artifact_id, from_state, to_state, actor, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'owner', ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 format!("strn_{}", ulid::Ulid::new()),
                 artifact.0,
                 from_state,
                 state.as_str(),
-                now
+                actor,
+                now,
             ],
         )?;
         Ok(())
@@ -320,6 +331,26 @@ pub fn tags_of(vault: &Vault, artifact: &ArtifactId) -> Result<Vec<String>, Arti
         .query_map([artifact.0.as_str()], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(tags)
+}
+
+/// Most recent audit actor for an artifact state transition.
+pub fn latest_transition_actor(
+    vault: &Vault,
+    artifact: &ArtifactId,
+) -> Result<Option<String>, ArtifactError> {
+    vault
+        .conn()
+        .query_row(
+            "SELECT actor FROM state_transitions
+             WHERE artifact_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+            [artifact.0.as_str()],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(ArtifactError::Database(other)),
+        })
 }
 
 fn row_to_artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {

@@ -80,6 +80,7 @@ mod tests {
             "provenance",
             "receipt_chain_state",
             "receipts_index",
+            "processing_errors",
         ] {
             let count: i64 = conn
                 .query_row(

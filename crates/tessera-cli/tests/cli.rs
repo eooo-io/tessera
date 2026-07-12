@@ -147,10 +147,23 @@ fn review_accept_all_takes_artifacts_live() {
         .write_stdin("q\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("a.txt"));
+        .stdout(
+            predicate::str::contains("a.txt")
+                .and(predicate::str::contains("Pending body"))
+                .and(predicate::str::contains("original: encrypted=true"))
+                .and(predicate::str::contains("provenance:")),
+        );
+
+    // The flag alone displays the batch but does not silently promote it.
+    tessera(&vault)
+        .args(["review", "--accept-all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("batch cancelled"));
 
     tessera(&vault)
         .args(["review", "--accept-all"])
+        .write_stdin("PROMOTE 1\n")
         .assert()
         .success()
         .stdout(predicate::str::contains("1 artifact"));
@@ -160,6 +173,166 @@ fn review_accept_all_takes_artifacts_live() {
         .assert()
         .success()
         .stdout(predicate::str::contains("No pending artifacts"));
+}
+
+#[test]
+fn review_edit_accept_updates_classification_and_audit_actor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("V.tessera");
+    tessera(&vault_path).args(["init"]).assert().success();
+    tessera(&vault_path)
+        .args(["space", "create", "Inbox"])
+        .assert()
+        .success();
+    let target_output = tessera(&vault_path)
+        .args(["space", "create", "Reviewed"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let target_space = String::from_utf8(target_output)
+        .expect("utf8")
+        .split_whitespace()
+        .find(|part| part.starts_with("space_"))
+        .expect("space id")
+        .to_owned();
+
+    let file = dir.path().join("edit.txt");
+    std::fs::write(&file, "Review and classify this exact content.").expect("write");
+    tessera(&vault_path)
+        .args(["inbox", "add"])
+        .arg(&file)
+        .assert()
+        .success();
+    // Two spaces exist, so choose the initial Inbox id explicitly.
+    let vault = tessera_core::Vault::open(&vault_path, "test-passphrase").expect("open");
+    let inbox_space = tessera_core::space::list(&vault)
+        .expect("spaces")
+        .into_iter()
+        .find(|space| space.name == "Inbox")
+        .expect("inbox space")
+        .id
+        .0;
+    drop(vault);
+    tessera(&vault_path)
+        .args(["inbox", "process", "--space", &inbox_space])
+        .assert()
+        .success();
+
+    tessera(&vault_path)
+        .args(["review"])
+        .write_stdin(format!("e\n{target_space}\nalpha,beta\nrestricted\n"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("classification updated"));
+
+    let vault = tessera_core::Vault::open(&vault_path, "test-passphrase").expect("reopen");
+    let artifact =
+        tessera_core::artifact::list_by_state(&vault, tessera_core::artifact::ArtifactState::Live)
+            .expect("live")
+            .into_iter()
+            .next()
+            .expect("artifact");
+    assert_eq!(artifact.space_id.0, target_space);
+    assert_eq!(artifact.sensitivity, tessera_core::Sensitivity::Restricted);
+    assert_eq!(
+        tessera_core::artifact::tags_of(&vault, &artifact.id).expect("tags"),
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
+    assert_eq!(
+        tessera_core::artifact::latest_transition_actor(&vault, &artifact.id)
+            .expect("actor")
+            .as_deref(),
+        Some("owner:review_edit_accept")
+    );
+}
+
+#[test]
+fn review_batch_refuses_incomplete_without_explicit_override() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("V.tessera");
+    tessera(&vault).args(["init"]).assert().success();
+    tessera(&vault)
+        .args(["space", "create", "Docs"])
+        .assert()
+        .success();
+    let file = dir.path().join("empty.txt");
+    std::fs::write(&file, "").expect("write");
+    tessera(&vault)
+        .args(["inbox", "add"])
+        .arg(&file)
+        .assert()
+        .success();
+    tessera(&vault)
+        .args(["inbox", "process"])
+        .assert()
+        .success();
+
+    tessera(&vault)
+        .args(["review", "--accept-all", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing bulk promotion"));
+    tessera(&vault)
+        .args(["review", "--accept-all", "--yes", "--allow-incomplete"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 artifact(s) → live"));
+}
+
+#[test]
+fn review_long_preview_retry_skip_and_archive_lifecycle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("V.tessera");
+    tessera(&vault).args(["init"]).assert().success();
+    tessera(&vault)
+        .args(["space", "create", "Docs"])
+        .assert()
+        .success();
+    let file = dir.path().join("lifecycle.txt");
+    std::fs::write(
+        &file,
+        "A long owner-only preview stays in memory. Retry is idempotent and skip keeps quarantine.",
+    )
+    .expect("write");
+    tessera(&vault)
+        .args(["inbox", "add"])
+        .arg(&file)
+        .assert()
+        .success();
+    tessera(&vault)
+        .args(["inbox", "process"])
+        .assert()
+        .success();
+
+    tessera(&vault)
+        .args(["review"])
+        .write_stdin("p\nr\n\n")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("owner preview")
+                .and(predicate::str::contains("processing retry completed"))
+                .and(predicate::str::contains("skipped")),
+        );
+    // Skip preserved pending state, so a second review can archive it.
+    tessera(&vault)
+        .args(["review"])
+        .write_stdin("x\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("archived"));
+    let vault = tessera_core::Vault::open(&vault, "test-passphrase").expect("open");
+    assert_eq!(
+        tessera_core::artifact::list_by_state(
+            &vault,
+            tessera_core::artifact::ArtifactState::Archived,
+        )
+        .expect("archived")
+        .len(),
+        1
+    );
 }
 
 #[test]
