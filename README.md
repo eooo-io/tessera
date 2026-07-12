@@ -65,7 +65,9 @@ cargo run -p tessera-guardian -- --vault /path/V.tessera \
 Remote MCP uses the published `2025-11-25` Streamable HTTP/OAuth contract,
 binds loopback by default, and requires an owner pairing for the exact OAuth
 client and lens. Setup and TLS-boundary guidance are in
-[`docs/http-oauth.md`](docs/http-oauth.md).
+[`docs/http-oauth.md`](docs/http-oauth.md). Real-binary stdio and HTTP lifecycle
+coverage, adversarial cases, and remaining limitations are recorded in
+[`docs/evidence/mcp-integration-report.md`](docs/evidence/mcp-integration-report.md).
 
 Purpose, identity, pairing reuse, lens changes, expiry, and revocation have
 deliberately narrow semantics. In particular, purpose is recorded but not

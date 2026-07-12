@@ -1422,6 +1422,10 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     }
                 }
                 ModelCommand::Fetch => {
+                    if onnx::verify_model_dir(&dir).is_ok() {
+                        println!("Verified model already active at {}", dir.display());
+                        return Ok(());
+                    }
                     let manifest = onnx::trusted_manifest()?;
                     activate_model(&dir, |staging| {
                         for file in &manifest.files {
