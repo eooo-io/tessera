@@ -23,7 +23,105 @@ use tessera_core::{receipt, Vault};
 use crate::session::GuardianSession;
 
 /// MCP protocol revision this server speaks.
-pub const PROTOCOL_VERSION: &str = "2025-06-18";
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Handle one authenticated Streamable HTTP JSON-RPC message. HTTP requests
+/// are stateless at the transport layer; each disclosing tool call receives a
+/// persisted live session and exact finalized receipt.
+pub fn handle_http_message(
+    vault: &Vault,
+    session: &GuardianSession,
+    msg: &Value,
+) -> anyhow::Result<Option<Value>> {
+    let id = msg.get("id").cloned();
+    let method = msg
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let response = match method {
+        "initialize" => result(id, initialize_result(session)),
+        "ping" => result(id, json!({})),
+        "tools/list" => result(id, json!({ "tools": tools::definitions(session) })),
+        "tools/call" => handle_http_tool(vault, session, msg, id)?,
+        other => error(id, -32601, &format!("method not found: {other}")),
+    };
+    Ok(Some(response))
+}
+
+fn handle_http_tool(
+    vault: &Vault,
+    session: &GuardianSession,
+    msg: &Value,
+    id: Value,
+) -> anyhow::Result<Value> {
+    let live = live_session::start(vault, &session.pairing)?;
+    let session_id = live.id.clone();
+    let mut receipt_session = match receipt::Session::open_bound(
+        vault,
+        receipt::AgentRef {
+            agent_id: session.pairing.id.clone(),
+            name: session.pairing.agent_name.clone(),
+        },
+        &session.lens,
+        session.pairing.purpose.clone(),
+        false,
+        receipt::SessionBinding {
+            session_id: session_id.clone(),
+            pairing_id: Some(session.pairing.id.clone()),
+        },
+    ) {
+        Ok(receipt_session) => receipt_session,
+        Err(error) => {
+            let _ = live_session::close(vault, &session_id, None);
+            return Err(error.into());
+        }
+    };
+    let params = msg.get("params");
+    let name = params
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let args = params
+        .and_then(|value| value.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let embedder = if name == "vault_query" {
+        let dir = tessera_core::embed::onnx::default_model_dir();
+        Some(tessera_core::embed::OnnxEmbedder::load(&dir))
+    } else {
+        None
+    };
+    let response = if let Some(Err(error)) = &embedder {
+        result(
+            id,
+            tool_error(&format!("embedding model unavailable: {error}")),
+        )
+    } else {
+        let provider = embedder
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map(|model| model as &dyn EmbeddingProvider);
+        match tools::call(&mut receipt_session, provider, session, vault, name, &args) {
+            Ok(value) => result(id, value),
+            Err(tools::ToolError::UnknownTool(name)) => {
+                error(id, -32601, &format!("unknown tool: {name}"))
+            }
+            Err(tools::ToolError::Failed(message)) => result(id, tool_error(&message)),
+        }
+    };
+    let finalized = if receipt_session.has_activity() {
+        receipt_session.finalize().map(|receipt| receipt.receipt_id)
+    } else {
+        Ok(String::new())
+    };
+    let receipt_id = finalized.as_ref().ok().filter(|id| !id.is_empty());
+    let _ = live_session::close(vault, &session_id, receipt_id.map(String::as_str));
+    finalized?;
+    Ok(response)
+}
 
 /// Serve MCP over stdin/stdout until the client closes the stream (EOF).
 ///

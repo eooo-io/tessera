@@ -294,6 +294,7 @@ mod tests {
             ttl_minutes: 60,
             approved_at: "2026-07-06T00:00:00Z".into(),
             revoked_at: None,
+            oauth_client_id: None,
         };
         let gsession = GuardianSession { pairing, lens };
         Fixture {

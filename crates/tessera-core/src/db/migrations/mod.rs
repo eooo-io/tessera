@@ -26,6 +26,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0011_processing_errors",
         include_str!("0011_processing_errors.sql"),
     ),
+    ("0012_http_oauth", include_str!("0012_http_oauth.sql")),
 ];
 
 /// Number of migrations this build knows about.

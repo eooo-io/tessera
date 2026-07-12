@@ -211,6 +211,16 @@ file, duplicate id/sequence, inconsistent filename, or disagreement among the
 head, index, and file chain fails closed. Existing pre-0010 file chains are
 backfilled only after the entire chain verifies.
 
+### HTTP OAuth metadata
+
+Migration 0012 adds OAuth public-client registrations, one-time authorization
+codes, and access-token bindings to `vault.db`, plus an optional
+`pairings.oauth_client_id`. Authorization codes and access tokens are stored
+only as BLAKE3 hashes. Each record binds the client, pairing/lens, exact
+redirect or resource URI, expiry, and revocation/use state. These tables are
+portable authorization metadata, not encrypted content; no source plaintext or
+raw bearer credential is stored in them.
+
 ## 7. `inbox/`
 
 Plaintext staging area. Files here are **not part of the vault's data set**:

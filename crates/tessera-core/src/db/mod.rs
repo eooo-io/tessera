@@ -81,6 +81,9 @@ mod tests {
             "receipt_chain_state",
             "receipts_index",
             "processing_errors",
+            "oauth_clients",
+            "oauth_authorization_codes",
+            "oauth_access_tokens",
         ] {
             let count: i64 = conn
                 .query_row(

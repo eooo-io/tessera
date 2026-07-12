@@ -186,6 +186,9 @@ pub enum PairCommand {
         /// Session TTL in minutes (defaults to the lens's default)
         #[arg(long)]
         ttl: Option<u32>,
+        /// Registered OAuth client id for remote HTTP access
+        #[arg(long)]
+        oauth_client: Option<String>,
     },
     /// List all pairings
     List,
@@ -979,6 +982,7 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     purpose,
                     agent,
                     ttl,
+                    oauth_client,
                 } => {
                     let lens_id = LensId(lens);
                     // Default the TTL to the lens's own default when unset.
@@ -986,11 +990,20 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         Some(t) => t,
                         None => tessera_core::lens::get(&vault, &lens_id)?.default_ttl_minutes,
                     };
-                    let p = pairing::approve(&vault, &lens_id, &purpose, &agent, ttl)?;
+                    let p = match oauth_client.as_deref() {
+                        Some(client_id) => pairing::approve_remote(
+                            &vault, &lens_id, &purpose, &agent, ttl, client_id,
+                        )?,
+                        None => pairing::approve(&vault, &lens_id, &purpose, &agent, ttl)?,
+                    };
                     println!("Approved pairing {}", p.id);
                     println!(
-                        "  lens={}  purpose={:?}  agent={}  ttl={}min",
-                        p.lens_id, p.purpose, p.agent_name, p.ttl_minutes
+                        "  lens={}  purpose={:?}  agent={}  ttl={}min  oauth_client={}",
+                        p.lens_id,
+                        p.purpose,
+                        p.agent_name,
+                        p.ttl_minutes,
+                        p.oauth_client_id.as_deref().unwrap_or("stdio")
                     );
                     println!(
                         "Launch the guardian with: tessera-guardian --vault <path> --pairing {}",
@@ -1001,11 +1014,12 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 PairCommand::List => {
                     for p in pairing::list(&vault)? {
                         println!(
-                            "{}  lens={}  purpose={:?}  agent={}  {}",
+                            "{}  lens={}  purpose={:?}  agent={}  oauth_client={}  {}",
                             p.id,
                             p.lens_id,
                             p.purpose,
                             p.agent_name,
+                            p.oauth_client_id.as_deref().unwrap_or("stdio"),
                             if p.is_active() { "active" } else { "revoked" }
                         );
                     }
