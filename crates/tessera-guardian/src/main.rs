@@ -12,6 +12,7 @@ mod agent;
 mod auth;
 mod routes;
 mod stream;
+mod unlock;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -51,6 +52,26 @@ struct Cli {
     /// Additional exact browser Origin allowed to call /mcp
     #[arg(long, requires = "http")]
     allow_origin: Vec<String>,
+
+    /// Read the passphrase once from an inherited descriptor (recommended)
+    #[arg(
+        long,
+        value_name = "FD",
+        conflicts_with_all = ["passphrase_file", "prompt_passphrase"]
+    )]
+    passphrase_fd: Option<i32>,
+
+    /// Read the passphrase once from a private regular file (mode 0600)
+    #[arg(long, conflicts_with = "prompt_passphrase")]
+    passphrase_file: Option<std::path::PathBuf>,
+
+    /// Prompt on the controlling terminal with input echo disabled
+    #[arg(long)]
+    prompt_passphrase: bool,
+
+    /// Exit and drop the unlocked DEK after this many idle seconds
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..))]
+    idle_lock_seconds: u64,
 }
 
 #[tokio::main]
@@ -63,8 +84,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let passphrase = std::env::var("TESSERA_PASSPHRASE")
-        .context("TESSERA_PASSPHRASE must be set to unlock the vault")?;
+    let passphrase = unlock::acquire(
+        cli.passphrase_fd,
+        cli.passphrase_file.as_deref(),
+        cli.prompt_passphrase,
+    )?;
     if cli.http {
         if !cli.bind.ip().is_loopback() && !cli.allow_non_loopback {
             anyhow::bail!(
@@ -75,12 +99,20 @@ async fn main() -> Result<()> {
         let public_url = cli
             .public_url
             .context("--public-url is required with --http")?;
-        let state = routes::HttpState::new(cli.vault, passphrase, public_url, cli.allow_origin)?;
-        return routes::serve(state, cli.bind).await;
+        let state =
+            routes::HttpState::new(cli.vault, passphrase.as_str(), public_url, cli.allow_origin)?;
+        drop(passphrase);
+        return routes::serve(
+            state,
+            cli.bind,
+            std::time::Duration::from_secs(cli.idle_lock_seconds),
+        )
+        .await;
     }
 
-    let vault = tessera_core::Vault::open(&cli.vault, &passphrase)
+    let vault = tessera_core::Vault::open(&cli.vault, passphrase.as_str())
         .with_context(|| format!("opening vault at {}", cli.vault.display()))?;
+    drop(passphrase);
 
     // Construction validates the pairing; a refusal exits non-zero with a
     // clear message on stderr and never starts serving.
@@ -88,10 +120,15 @@ async fn main() -> Result<()> {
     let session = GuardianSession::bind(&vault, &pairing)?;
 
     // The embedding model is loaded lazily on the first vault_query.
-    mcp::serve_stdio(&vault, &session, || {
-        let dir = tessera_core::embed::onnx::default_model_dir();
-        let embedder = tessera_core::embed::OnnxEmbedder::load(&dir)
-            .context("loading embedding model (run `tessera model fetch`)")?;
-        Ok(Box::new(embedder) as Box<dyn tessera_core::embed::EmbeddingProvider>)
-    })
+    mcp::serve_stdio(
+        &vault,
+        &session,
+        std::time::Duration::from_secs(cli.idle_lock_seconds),
+        || {
+            let dir = tessera_core::embed::onnx::default_model_dir();
+            let embedder = tessera_core::embed::OnnxEmbedder::load(&dir)
+                .context("loading embedding model (run `tessera model fetch`)")?;
+            Ok(Box::new(embedder) as Box<dyn tessera_core::embed::EmbeddingProvider>)
+        },
+    )
 }

@@ -64,6 +64,10 @@ impl Dek {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
     }
+
+    pub(crate) fn duplicate(&self) -> Self {
+        Self { bytes: self.bytes }
+    }
 }
 
 /// One keyslot: per-slot KDF params, salt, nonce, and the wrapped DEK.

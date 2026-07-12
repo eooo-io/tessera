@@ -84,6 +84,7 @@ mod tests {
             "oauth_clients",
             "oauth_authorization_codes",
             "oauth_access_tokens",
+            "guardian_lock_state",
         ] {
             let count: i64 = conn
                 .query_row(

@@ -137,11 +137,20 @@ fn handle_http_tool(
 pub fn serve_stdio(
     vault: &Vault,
     session: &GuardianSession,
+    idle_timeout: Duration,
     load_embedder: impl Fn() -> anyhow::Result<Box<dyn EmbeddingProvider>>,
 ) -> anyhow::Result<()> {
-    let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            if input_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
 
     // Register the persisted live session first. The receipt is bound to this
     // exact identity; generating a second synthetic session id would make the
@@ -149,6 +158,7 @@ pub fn serve_stdio(
     let live = live_session::start(vault, &session.pairing)
         .map_err(|e| anyhow::anyhow!("starting session: {e}"))?;
     let session_id = live.id.clone();
+    let unlock_generation = live_session::lock_generation(vault)?;
 
     // The connection IS a receipt session; every disclosure is journaled.
     let agent = receipt::AgentRef {
@@ -181,11 +191,36 @@ pub fn serve_stdio(
         lens = %session.lens.name,
         purpose = %session.pairing.purpose,
         expires = %live.expires_at,
+        idle_seconds = idle_timeout.as_secs(),
         "guardian session bound; serving MCP over stdio"
     );
 
-    for line in stdin.lock().lines() {
-        let line = line?;
+    let mut last_activity = Instant::now();
+    loop {
+        let idle_remaining = idle_timeout.saturating_sub(last_activity.elapsed());
+        if idle_remaining.is_zero() {
+            tracing::info!(session = %session_id, "guardian idle timeout; locking vault");
+            break;
+        }
+        let poll = idle_remaining.min(Duration::from_secs(1));
+        let line = match input_rx.recv_timeout(poll) {
+            Ok(line) => {
+                if live_session::lock_generation(vault)? != unlock_generation {
+                    tracing::info!(session = %session_id, "owner lock signal observed; locking vault");
+                    break;
+                }
+                last_activity = Instant::now();
+                line?
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if live_session::lock_generation(vault)? != unlock_generation {
+                    tracing::info!(session = %session_id, "owner lock signal observed; locking vault");
+                    break;
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         if line.trim().is_empty() {
             continue;
         }

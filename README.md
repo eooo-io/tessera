@@ -57,8 +57,9 @@ cargo clippy -- -D warnings
 # Run the CLI
 cargo run -p tessera-cli -- --help
 
-# Run the guardian
-cargo run -p tessera-guardian
+# Run the guardian with a no-echo owner prompt
+cargo run -p tessera-guardian -- --vault /path/V.tessera \
+  --pairing pair_... --prompt-passphrase
 ```
 
 Remote MCP uses the published `2025-11-25` Streamable HTTP/OAuth contract,
@@ -71,6 +72,12 @@ deliberately narrow semantics. In particular, purpose is recorded but not
 semantically enforced, stdio identity is local configuration trust rather than
 attestation, and revocation cannot retract prior disclosure. See
 [`docs/authorization-model.md`](docs/authorization-model.md).
+
+Guardian startup never reads `TESSERA_PASSPHRASE`. Non-interactive clients
+should deliver the passphrase once over an inherited descriptor; private-file
+and no-echo prompt fallbacks remain portable. Idle/explicit lock behavior,
+keyslot recovery, and residual risks are documented in
+[`docs/guardian-unlock.md`](docs/guardian-unlock.md).
 
 ## Quarantine review
 
