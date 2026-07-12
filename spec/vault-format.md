@@ -96,8 +96,11 @@ version — mixed model versions in one vault are refused at query time).
 Migrations 0006–0009 append lenses, summaries, pairings, and live sessions.
 Migration 0010 adds `receipt_chain_state` (the singleton next-sequence/head)
 and `receipts_index` (unique receipt id and sequence, predecessor/self hashes,
-and final filename). The database never contains plaintext artifact content or
-receipt JSON.
+and final filename). Migration 0011 adds `processing_errors`, a bounded
+per-artifact/stage error history used by owner quarantine review; resolved
+errors remain auditable. Error messages are plaintext metadata and MUST NOT
+contain source content, credentials, or secrets. The database never contains
+plaintext artifact content or receipt JSON.
 
 ## 4. `keyslot.bin`
 

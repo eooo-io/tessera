@@ -61,6 +61,22 @@ cargo run -p tessera-cli -- --help
 cargo run -p tessera-guardian
 ```
 
+## Quarantine review
+
+Ingested artifacts remain `pending` and unreachable through every lens until
+the owner reviews them. `tessera review` shows an in-memory content preview,
+encrypted-original and processing status, provenance, version, tags,
+sensitivity, chunks, embeddings, summaries, and active processing errors. The
+owner can inspect a longer preview, retry processing, edit classification and
+accept, archive, skip, or quit. Previews are printed only to the owner terminal
+and are never written to plaintext temporary files.
+
+`tessera review --accept-all` first lists the affected set and requires an
+explicit `PROMOTE <count>` confirmation (or `--yes`). It refuses unsupported,
+failed, or empty processing results unless the owner also passes
+`--allow-incomplete`. That override is deliberately loud; a filename is not a
+content review, no matter how confident the flag looks.
+
 ## Project Structure
 
 ```

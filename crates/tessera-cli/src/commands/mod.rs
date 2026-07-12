@@ -24,9 +24,15 @@ pub enum Command {
     },
     /// Review quarantined artifacts
     Review {
-        /// Accept every pending artifact without prompting
+        /// Review and accept every pending artifact as one explicit batch
         #[arg(long)]
         accept_all: bool,
+        /// Confirm the displayed batch non-interactively
+        #[arg(long, requires = "accept_all")]
+        yes: bool,
+        /// Permit promotion of unsupported, failed, or empty processing results
+        #[arg(long, requires = "accept_all")]
+        allow_incomplete: bool,
     },
     /// Stage, ingest, and (with --accept) immediately publish files
     Import {
@@ -317,20 +323,45 @@ fn run_inbox_pipeline(
     for (path, artifact_id) in &report.ingested {
         match tessera_core::extract::extract_text(vault, artifact_id) {
             Ok(Some(derived)) => {
+                tessera_core::review::resolve_processing_error(vault, artifact_id, "extract")?;
                 if let Err(e) = tessera_core::chunk::chunk_derived_text(
                     vault,
                     &derived,
                     &tessera_core::chunk::ChunkParams::default(),
                 ) {
+                    tessera_core::review::record_processing_error(
+                        vault,
+                        artifact_id,
+                        "chunk",
+                        &e.to_string(),
+                    )?;
                     eprintln!("warning: chunking failed for {}: {e}", path.display());
+                } else {
+                    tessera_core::review::resolve_processing_error(vault, artifact_id, "chunk")?;
                 }
                 // Summary powers the `summary` disclosure mode; best-effort.
                 if let Err(e) = tessera_core::summary::generate(vault, artifact_id, false) {
+                    tessera_core::review::record_processing_error(
+                        vault,
+                        artifact_id,
+                        "summary",
+                        &e.to_string(),
+                    )?;
                     eprintln!("warning: summary failed for {}: {e}", path.display());
+                } else {
+                    tessera_core::review::resolve_processing_error(vault, artifact_id, "summary")?;
                 }
             }
             Ok(None) => {}
-            Err(e) => eprintln!("warning: extraction failed for {}: {e}", path.display()),
+            Err(e) => {
+                tessera_core::review::record_processing_error(
+                    vault,
+                    artifact_id,
+                    "extract",
+                    &e.to_string(),
+                )?;
+                eprintln!("warning: extraction failed for {}: {e}", path.display());
+            }
         }
         println!("Ingested {}  {}", artifact_id.0, path.display());
         ingested.push(artifact_id.clone());
@@ -450,6 +481,102 @@ fn edit_in_editor(initial: &str, id: &str) -> anyhow::Result<String> {
     Ok(contents?)
 }
 
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .flat_map(|ch| match ch {
+            '\n' | '\t' => ch.to_string().chars().collect::<Vec<_>>(),
+            ch if ch.is_control() => ch.escape_default().collect(),
+            ch => vec![ch],
+        })
+        .collect()
+}
+
+fn print_review_item(item: &tessera_core::review::ReviewItem) {
+    println!(
+        "\n{}  {}  [{}]  version={}  space={}  sensitivity={}",
+        item.artifact.id.0,
+        terminal_safe(&item.artifact.filename),
+        terminal_safe(&item.artifact.media_type),
+        item.version,
+        item.artifact.space_id.0,
+        item.artifact.sensitivity.as_str()
+    );
+    println!(
+        "original: encrypted={} artifact_version={} size={} hash={} behavior={}",
+        item.encrypted_original_present,
+        item.artifact_version_id,
+        item.original_size_bytes,
+        item.original_blob_hash,
+        if item.version == 1 {
+            "initial"
+        } else {
+            "replacement/versioned"
+        }
+    );
+    println!(
+        "processing: extractor={} chunks={} embeddings={} summary={}",
+        item.extractor
+            .as_deref()
+            .map(|name| format!(
+                "{}@{}",
+                terminal_safe(name),
+                terminal_safe(item.extractor_version.as_deref().unwrap_or("unknown"))
+            ))
+            .unwrap_or_else(|| "none".into()),
+        item.chunk_count,
+        item.embedding_count,
+        item.summary_present
+    );
+    println!(
+        "classification: tags={}  suggested=none (v0.1)",
+        if item.tags.is_empty() {
+            "(none)".into()
+        } else {
+            item.tags
+                .iter()
+                .map(|tag| terminal_safe(tag))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    );
+    if let Some(preview) = &item.preview {
+        println!("owner preview:\n{}", terminal_safe(preview));
+    } else {
+        println!("owner preview: unavailable");
+    }
+    for provenance in &item.provenance {
+        println!(
+            "provenance: {} {}@{} locality={} source={}",
+            provenance.id,
+            terminal_safe(&provenance.tool),
+            terminal_safe(provenance.tool_version.as_deref().unwrap_or("unknown")),
+            terminal_safe(&provenance.locality),
+            provenance
+                .source_artifact_version_id
+                .as_deref()
+                .unwrap_or("none")
+        );
+    }
+    for error in &item.processing_errors {
+        println!(
+            "processing error: stage={} at={} detail={}",
+            terminal_safe(&error.stage),
+            terminal_safe(&error.occurred_at),
+            terminal_safe(&error.message)
+        );
+    }
+    for warning in &item.warnings {
+        println!("WARNING: {}", terminal_safe(warning));
+    }
+}
+
+fn confirm_incomplete(item: &tessera_core::review::ReviewItem) -> anyhow::Result<bool> {
+    if item.ready_for_promotion {
+        return Ok(true);
+    }
+    Ok(prompt_line("Type ACCEPT INCOMPLETE to override > ")? == "ACCEPT INCOMPLETE")
+}
+
 /// Interactive review loop over pending artifacts. SSH-safe: plain stdin.
 fn review_interactive(vault: &Vault) -> anyhow::Result<()> {
     use tessera_core::artifact::{self, ArtifactState, Sensitivity};
@@ -460,62 +587,135 @@ fn review_interactive(vault: &Vault) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let stdin = std::io::stdin();
     for art in pending {
-        println!(
-            "\n{}  {}  [{}]  space={}  sensitivity={}",
-            art.id.0,
-            art.filename,
-            art.media_type,
-            art.space_id.0,
-            art.sensitivity.as_str()
-        );
-        print!("[a]ccept  [t]ags+accept  [s]ensitivity+accept  [x]archive  [enter]skip  [q]uit > ");
-        std::io::stdout().flush()?;
-
-        let mut line = String::new();
-        if stdin.read_line(&mut line)? == 0 {
-            break; // EOF: stop reviewing
-        }
-        match line.trim() {
-            "a" => {
-                artifact::set_state(vault, &art.id, ArtifactState::Live)?;
-                println!("{} → live", art.id.0);
-            }
-            "t" => {
-                print!("tags (comma-separated) > ");
-                std::io::stdout().flush()?;
-                let mut tags = String::new();
-                stdin.read_line(&mut tags)?;
-                for tag in tags.split(',').map(str::trim).filter(|t| !t.is_empty()) {
-                    artifact::tag(vault, &art.id, tag)?;
+        let mut item = tessera_core::review::inspect(vault, &art.id, 400)?;
+        loop {
+            print_review_item(&item);
+            let action = prompt_line(
+                "[a]ccept  [e]dit+accept  longer [p]review  [r]etry  [x]archive  [enter]skip  [q]uit > ",
+            )?;
+            match action.as_str() {
+                "a" => {
+                    if !confirm_incomplete(&item)? {
+                        println!("not promoted");
+                        continue;
+                    }
+                    tessera_core::review::classify_and_promote(
+                        vault,
+                        &art.id,
+                        None,
+                        None,
+                        None,
+                        "owner:review_accept",
+                    )?;
+                    println!("{} → live", art.id.0);
+                    break;
                 }
-                artifact::set_state(vault, &art.id, ArtifactState::Live)?;
-                println!("{} → live (tagged)", art.id.0);
+                "e" => {
+                    if !confirm_incomplete(&item)? {
+                        println!("not promoted");
+                        continue;
+                    }
+                    let space = prompt_line("space id (blank keeps current) > ")?;
+                    let tags = prompt_line("tags, comma-separated (blank keeps current) > ")?;
+                    let sensitivity = prompt_line(
+                        "sensitivity public/internal/confidential/restricted (blank keeps current) > ",
+                    )?;
+                    let space = (!space.is_empty()).then_some(SpaceId(space));
+                    let tags = (!tags.is_empty()).then(|| parse_csv(&tags));
+                    let sensitivity = match sensitivity.as_str() {
+                        "public" => Some(Sensitivity::Public),
+                        "internal" => Some(Sensitivity::Internal),
+                        "confidential" => Some(Sensitivity::Confidential),
+                        "restricted" => Some(Sensitivity::Restricted),
+                        "" => None,
+                        _ => bail!("unknown sensitivity; artifact remains pending"),
+                    };
+                    tessera_core::review::classify_and_promote(
+                        vault,
+                        &art.id,
+                        space.as_ref(),
+                        tags.as_deref(),
+                        sensitivity,
+                        "owner:review_edit_accept",
+                    )?;
+                    println!("{} → live (classification updated)", art.id.0);
+                    break;
+                }
+                "p" => {
+                    item = tessera_core::review::inspect(vault, &art.id, 4000)?;
+                }
+                "r" => match tessera_core::review::retry_processing(vault, &art.id) {
+                    Ok(retried) => {
+                        item = retried;
+                        println!("processing retry completed");
+                    }
+                    Err(error) => println!("processing retry failed: {error}"),
+                },
+                "x" => {
+                    artifact::set_state_by(
+                        vault,
+                        &art.id,
+                        ArtifactState::Archived,
+                        "owner:review_archive",
+                    )?;
+                    println!("{} → archived", art.id.0);
+                    break;
+                }
+                "q" => return Ok(()),
+                _ => {
+                    println!("skipped");
+                    break;
+                }
             }
-            "s" => {
-                print!("sensitivity (public/internal/confidential/restricted) > ");
-                std::io::stdout().flush()?;
-                let mut level = String::new();
-                stdin.read_line(&mut level)?;
-                let sensitivity = match level.trim() {
-                    "public" => Sensitivity::Public,
-                    "confidential" => Sensitivity::Confidential,
-                    "restricted" => Sensitivity::Restricted,
-                    _ => Sensitivity::Internal,
-                };
-                artifact::set_sensitivity(vault, &art.id, sensitivity)?;
-                artifact::set_state(vault, &art.id, ArtifactState::Live)?;
-                println!("{} → live ({})", art.id.0, sensitivity.as_str());
-            }
-            "x" => {
-                artifact::set_state(vault, &art.id, ArtifactState::Archived)?;
-                println!("{} → archived", art.id.0);
-            }
-            "q" => break,
-            _ => println!("skipped"),
         }
     }
+    Ok(())
+}
+
+fn review_batch(vault: &Vault, yes: bool, allow_incomplete: bool) -> anyhow::Result<()> {
+    use tessera_core::artifact::{self, ArtifactState};
+
+    let pending = artifact::list_by_state(vault, ArtifactState::Pending)?;
+    if pending.is_empty() {
+        println!("No pending artifacts.");
+        return Ok(());
+    }
+    let mut items = Vec::with_capacity(pending.len());
+    println!("Pending batch:");
+    for artifact in pending {
+        let item = tessera_core::review::inspect(vault, &artifact.id, 160)?;
+        println!(
+            "- {} {} ready={} warnings={}",
+            artifact.id.0,
+            terminal_safe(&artifact.filename),
+            item.ready_for_promotion,
+            item.warnings.len()
+        );
+        items.push(item);
+    }
+    let incomplete = items
+        .iter()
+        .filter(|item| !item.ready_for_promotion)
+        .count();
+    if incomplete > 0 && !allow_incomplete {
+        bail!(
+            "refusing bulk promotion: {incomplete} artifact(s) have unsupported, failed, or empty processing; inspect individually or pass --allow-incomplete"
+        );
+    }
+    if !yes {
+        let expected = format!("PROMOTE {}", items.len());
+        if prompt_line(&format!("Type {expected} to confirm > "))? != expected {
+            println!("batch cancelled; all artifacts remain pending");
+            return Ok(());
+        }
+    }
+    let artifact_ids = items
+        .iter()
+        .map(|item| item.artifact.id.clone())
+        .collect::<Vec<_>>();
+    tessera_core::review::promote_batch(vault, &artifact_ids, "owner:review_batch_accept")?;
+    println!("{} artifact(s) → live", items.len());
     Ok(())
 }
 
@@ -591,21 +791,14 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Review { accept_all } => {
+        Command::Review {
+            accept_all,
+            yes,
+            allow_incomplete,
+        } => {
             let vault = open_vault(&vault_path)?;
             if accept_all {
-                use tessera_core::artifact::{self, ArtifactState};
-                let pending = artifact::list_by_state(&vault, ArtifactState::Pending)?;
-                if pending.is_empty() {
-                    println!("No pending artifacts.");
-                    return Ok(());
-                }
-                let count = pending.len();
-                for art in pending {
-                    artifact::set_state(&vault, &art.id, ArtifactState::Live)?;
-                }
-                println!("{count} artifact(s) → live");
-                Ok(())
+                review_batch(&vault, yes, allow_incomplete)
             } else {
                 review_interactive(&vault)
             }
