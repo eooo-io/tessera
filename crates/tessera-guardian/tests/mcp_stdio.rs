@@ -188,6 +188,41 @@ fn incompatible_consumer_contract_fails_initialize_cleanly() {
 }
 
 #[test]
+fn checked_in_stdio_reference_client_passes_against_real_guardian() {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "reference client", "consumer", 60).expect("approve");
+    drop(vault);
+    let passphrase_file = path.parent().unwrap().join("reference-client-passphrase");
+    std::fs::write(&passphrase_file, "pass\n").expect("passphrase");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&passphrase_file, std::fs::Permissions::from_mode(0o600))
+            .expect("private passphrase");
+    }
+    let client = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance/guardian-v1/clients/stdio_client.py");
+    let output = Command::new("python3")
+        .arg(client)
+        .args(["--guardian", GUARDIAN, "--vault"])
+        .arg(&path)
+        .args(["--pairing", &pairing.id, "--passphrase-file"])
+        .arg(&passphrase_file)
+        .output()
+        .expect("run checked-in stdio client");
+    assert!(
+        output.status.success(),
+        "reference client failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert!(stdout.contains("tessera.guardian.v1"));
+    assert!(stdout.contains("vault_query"));
+}
+
+#[test]
 fn tools_list_and_ping_after_initialize() {
     let (_dir, path, lens_id) = vault_with_lens();
     let vault = Vault::open(&path, "pass").expect("open");
