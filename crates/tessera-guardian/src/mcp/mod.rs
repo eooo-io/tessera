@@ -161,8 +161,8 @@ fn handle_http_tool(
             Err(tools::ToolError::UnknownTool(name)) => {
                 error(id, -32601, &format!("unknown tool: {name}"))
             }
-            Err(tools::ToolError::Failed(message)) => {
-                result(id, tools::failure(session, name, "tool_failed", &message))
+            Err(tools::ToolError::Failed { code, diagnostic }) => {
+                result(id, tools::failure(session, name, code, &diagnostic))
             }
         }
     };
@@ -453,8 +453,8 @@ pub fn serve_stdio(
                     Err(tools::ToolError::UnknownTool(n)) => {
                         error(id, -32601, &format!("unknown tool: {n}"))
                     }
-                    Err(tools::ToolError::Failed(m)) => {
-                        result(id, tools::failure(session, &name, "tool_failed", &m))
+                    Err(tools::ToolError::Failed { code, diagnostic }) => {
+                        result(id, tools::failure(session, &name, code, &diagnostic))
                     }
                 };
                 write_message(&mut out, response)?;

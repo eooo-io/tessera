@@ -60,12 +60,13 @@
             "code": {
               "enum": [
                 "authorization_ended",
-                "metadata_denied",
+                "corrupt_evidence",
                 "model_unavailable",
-                "policy_or_source_error",
+                "policy_denied",
                 "rate_limited",
                 "session_ended",
                 "session_unavailable",
+                "source_unavailable",
                 "tool_failed"
               ]
             },

@@ -65,6 +65,24 @@ Consumers may branch on versioned enums and error codes, never on diagnostic
 prose. All values beneath evidence, spaces, citation, and diagnostic remain
 untrusted even when the vault owner curated them.
 
+Stable tool-result error codes are:
+
+| Code | Meaning | Retry guidance |
+|---|---|---|
+| `authorization_ended` | pairing/lens/session authorization is no longer valid | owner action required |
+| `policy_denied` | the active lens forbids the requested disclosure or metadata; unknown direct-item ids use this same code to avoid an existence oracle | do not retry unchanged |
+| `model_unavailable` | the pinned model is absent, invalid, or uncalibrated | provision/repair model first |
+| `corrupt_evidence` | authenticated evidence, ranges, or receipt linkage failed integrity checks | stop disclosure; owner recovery required |
+| `source_unavailable` | the requested artifact or required derived evidence does not exist | refresh identifier or owner processing |
+| `rate_limited` | the session exceeded its lens-bound rolling limit | retry after the advertised window |
+| `session_ended` | the live session expired or was revoked | establish fresh authorization |
+| `session_unavailable` | Guardian could not re-open the bound live session | owner/runtime repair required |
+| `tool_failed` | bounded internal/tool-input failure not covered above | inspect diagnostic; do not assume retry safety |
+
+`no_result` is a successful status, not an error code. JSON-RPC parse,
+invalid-request, method, and incompatible-contract failures remain protocol
+errors (`-32700`, `-32600`, `-32601`, and `-32602`) outside the tool envelope.
+
 ## Compatibility and deprecation
 
 - Additive optional fields may appear only where the v1 schema permits them.
