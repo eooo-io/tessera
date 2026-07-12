@@ -43,6 +43,28 @@ fn init_refuses_existing_vault() {
 }
 
 #[test]
+fn keyslot_listing_and_removal_guard_are_owner_visible() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("V.tessera");
+    tessera(&vault).args(["init"]).assert().success();
+    tessera(&vault)
+        .args(["key", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 keyslot").and(predicate::str::contains("0")));
+    tessera(&vault)
+        .args(["key", "remove", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("re-run with --yes"));
+    tessera(&vault)
+        .args(["key", "remove", "0", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("last keyslot"));
+}
+
+#[test]
 fn space_create_list_and_tree() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("V.tessera");

@@ -130,6 +130,43 @@ impl Vault {
         self.dek.is_none()
     }
 
+    /// Add a recovery/rotation keyslot wrapping the existing DEK. Source blobs
+    /// are not re-encrypted; every keyslot unlocks the same portable vault.
+    pub fn add_keyslot(&self, passphrase: &str, params: &KdfParams) -> Result<usize, VaultError> {
+        let mut keyslots = KeyslotFile::load(&self.path.join("keyslot.bin"))?;
+        keyslots.add_slot(self.dek()?, passphrase, params)?;
+        keyslots.save(&self.path.join("keyslot.bin"))?;
+        Ok(keyslots.slot_count() - 1)
+    }
+
+    /// Remove one keyslot. The keyslot layer refuses removal of the last slot.
+    pub fn remove_keyslot(&self, index: usize) -> Result<(), VaultError> {
+        let mut keyslots = KeyslotFile::load(&self.path.join("keyslot.bin"))?;
+        keyslots.remove_slot(index)?;
+        keyslots.save(&self.path.join("keyslot.bin"))?;
+        Ok(())
+    }
+
+    pub fn keyslot_count(&self) -> Result<usize, VaultError> {
+        Ok(KeyslotFile::load(&self.path.join("keyslot.bin"))?.slot_count())
+    }
+
+    /// Open another database connection using the already-unlocked DEK. This
+    /// supports concurrent in-process Guardian requests without retaining or
+    /// re-reading the passphrase. Each duplicated DEK zeroizes on drop.
+    pub fn reopen_unlocked(&self) -> Result<Self, VaultError> {
+        let manifest = VaultManifest::load(&self.path.join("tessera.json"))?;
+        let conn = crate::db::open_database(&self.path.join("vault.db"))?;
+        let blobs = BlobStore::open(&self.path.join("blobs"))?;
+        Ok(Self {
+            path: self.path.clone(),
+            manifest,
+            conn,
+            blobs,
+            dek: Some(self.dek()?.duplicate()),
+        })
+    }
+
     /// The unlocked DEK, or `VaultError::Locked`.
     pub(crate) fn dek(&self) -> Result<&Dek, VaultError> {
         self.dek.as_ref().ok_or(VaultError::Locked)
@@ -230,6 +267,40 @@ mod tests {
             Vault::open(&path, "wrong"),
             Err(VaultError::BadPassphrase)
         ));
+    }
+
+    #[test]
+    fn recovery_keyslot_add_open_remove_rotation_workflow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("V.tessera");
+        let vault = Vault::create_with_params(&path, "primary", &TEST_PARAMS).expect("create");
+        assert_eq!(vault.keyslot_count().expect("count"), 1);
+        let recovery_index = vault
+            .add_keyslot("recovery", &TEST_PARAMS)
+            .expect("add recovery");
+        assert_eq!(recovery_index, 1);
+        drop(vault);
+
+        let via_recovery = Vault::open(&path, "recovery").expect("recovery opens");
+        via_recovery.remove_keyslot(0).expect("remove primary");
+        drop(via_recovery);
+        assert!(matches!(
+            Vault::open(&path, "primary"),
+            Err(VaultError::BadPassphrase)
+        ));
+        let rotated = Vault::open(&path, "recovery").expect("recovery remains");
+        assert!(rotated.remove_keyslot(0).is_err(), "last slot is protected");
+    }
+
+    #[test]
+    fn reopened_unlocked_handle_has_independent_connection_and_zeroizing_dek() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("V.tessera");
+        let vault = Vault::create_with_params(&path, "primary", &TEST_PARAMS).expect("create");
+        let reopened = vault.reopen_unlocked().expect("reopen unlocked");
+        drop(vault);
+        crate::space::create(&reopened, "Concurrent", None).expect("independent connection");
+        assert_eq!(crate::space::list(&reopened).expect("list").len(), 1);
     }
 
     #[test]

@@ -2,8 +2,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::extract::{DefaultBodyLimit, Form, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -20,17 +22,18 @@ use crate::session::GuardianSession;
 
 #[derive(Clone)]
 pub struct HttpState {
-    vault_path: Arc<PathBuf>,
-    passphrase: Arc<str>,
+    vault: Arc<Mutex<tessera_core::Vault>>,
     public_url: Arc<str>,
     resource: Arc<str>,
     allowed_origins: Arc<Vec<String>>,
+    last_activity: Arc<Mutex<Instant>>,
+    unlock_generation: u64,
 }
 
 impl HttpState {
     pub fn new(
         vault_path: PathBuf,
-        passphrase: String,
+        passphrase: &str,
         public_url: String,
         allowed_origins: Vec<String>,
     ) -> anyhow::Result<Self> {
@@ -62,20 +65,45 @@ impl HttpState {
         if !origins.contains(&origin) {
             origins.push(origin);
         }
+        let vault = tessera_core::Vault::open(&vault_path, passphrase)
+            .with_context(|| format!("opening vault at {}", vault_path.display()))?;
+        let unlock_generation = tessera_core::session::lock_generation(&vault)?;
         Ok(Self {
-            vault_path: Arc::new(vault_path),
-            passphrase: Arc::from(passphrase),
+            vault: Arc::new(Mutex::new(vault)),
             public_url: Arc::from(public_url),
             resource: Arc::from(resource),
             allowed_origins: Arc::new(origins),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+            unlock_generation,
         })
     }
 
     fn open_vault(&self) -> anyhow::Result<tessera_core::Vault> {
-        Ok(tessera_core::Vault::open(
-            self.vault_path.as_ref(),
-            self.passphrase.as_ref(),
-        )?)
+        let vault = self
+            .vault
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vault lock is poisoned"))?;
+        Ok(vault.reopen_unlocked()?)
+    }
+
+    fn touch(&self) {
+        if let Ok(mut activity) = self.last_activity.lock() {
+            *activity = Instant::now();
+        }
+    }
+
+    fn idle_for(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .map(|activity| activity.elapsed())
+            .unwrap_or(Duration::MAX)
+    }
+
+    fn lock_requested(&self) -> bool {
+        self.open_vault()
+            .and_then(|vault| Ok(tessera_core::session::lock_generation(&vault)?))
+            .map(|generation| generation != self.unlock_generation)
+            .unwrap_or(true)
     }
 }
 
@@ -97,11 +125,34 @@ pub fn router(state: HttpState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(state: HttpState, bind: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve(
+    state: HttpState,
+    bind: SocketAddr,
+    idle_timeout: Duration,
+) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!(%bind, resource = %state.resource, "serving MCP Streamable HTTP");
-    axum::serve(listener, router(state)).await?;
+    tracing::info!(%bind, resource = %state.resource, idle_seconds = idle_timeout.as_secs(), "serving MCP Streamable HTTP");
+    let shutdown_state = state.clone();
+    let shutdown = wait_for_lock(shutdown_state, idle_timeout);
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
+}
+
+async fn wait_for_lock(state: HttpState, idle_timeout: Duration) {
+    let poll = idle_timeout.min(Duration::from_secs(1));
+    loop {
+        tokio::time::sleep(poll).await;
+        if state.lock_requested() {
+            tracing::info!("owner lock signal observed; locking vault");
+            break;
+        }
+        if state.idle_for() >= idle_timeout {
+            tracing::info!("guardian idle timeout; locking vault");
+            break;
+        }
+    }
 }
 
 async fn protected_resource_metadata(State(state): State<HttpState>) -> Json<Value> {
@@ -222,6 +273,7 @@ async fn authorize(
         Ok(code) => code,
         Err(_) => return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
+    state.touch();
     let mut redirect = match url::Url::parse(&request.redirect_uri) {
         Ok(url) => url,
         Err(_) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request"),
@@ -266,15 +318,18 @@ async fn token(State(state): State<HttpState>, Form(form): Form<TokenForm>) -> R
         &pkce_challenge(&form.code_verifier),
         &form.resource,
     ) {
-        Ok(grant) => no_store(
-            Json(json!({
-                "access_token": grant.access_token,
-                "token_type": "Bearer",
-                "expires_in": grant.expires_in,
-                "scope": grant.scope,
-            }))
-            .into_response(),
-        ),
+        Ok(grant) => {
+            state.touch();
+            no_store(
+                Json(json!({
+                    "access_token": grant.access_token,
+                    "token_type": "Bearer",
+                    "expires_in": grant.expires_in,
+                    "scope": grant.scope,
+                }))
+                .into_response(),
+            )
+        }
         Err(_) => oauth_error(StatusCode::BAD_REQUEST, "invalid_grant"),
     }
 }
@@ -306,6 +361,9 @@ async fn mcp_post(
         Ok(vault) => vault,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    if tessera_core::session::lock_generation(&vault).ok() != Some(state.unlock_generation) {
+        return StatusCode::LOCKED.into_response();
+    }
     let token = match bearer(&headers) {
         Some(token) => token,
         None => return unauthorized(&state, None),
@@ -318,6 +376,7 @@ async fn mcp_post(
         Ok(session) if session.lens.id.0 == binding.lens_id => session,
         _ => return unauthorized(&state, Some(&format!("lens:{}", binding.lens_id))),
     };
+    state.touch();
     match mcp::handle_http_message(&vault, &session, &message) {
         Ok(Some(value)) => Json(value).into_response(),
         Ok(None) => StatusCode::ACCEPTED.into_response(),
@@ -333,10 +392,16 @@ async fn mcp_get(State(state): State<HttpState>, headers: HeaderMap) -> Response
         Ok(vault) => vault,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    if tessera_core::session::lock_generation(&vault).ok() != Some(state.unlock_generation) {
+        return StatusCode::LOCKED.into_response();
+    }
     match bearer(&headers)
         .and_then(|token| oauth::validate_token(&vault, token, state.resource.as_ref()).ok())
     {
-        Some(_) => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        Some(_) => {
+            state.touch();
+            StatusCode::METHOD_NOT_ALLOWED.into_response()
+        }
         None => unauthorized(&state, None),
     }
 }
@@ -480,7 +545,7 @@ mod tests {
         drop(vault);
         let state = HttpState::new(
             vault_path,
-            "pass".to_owned(),
+            "pass",
             "https://tessera.example".to_owned(),
             Vec::new(),
         )
@@ -515,26 +580,30 @@ mod tests {
             .expect("client id")
             .to_owned();
 
-        let vault = state.open_vault().expect("vault");
-        let lenses = lens::list(&vault).expect("lenses");
-        let allowed_lens = lenses
-            .iter()
-            .find(|lens| lens.name == "Remote Allowed")
-            .expect("allowed lens");
-        let blocked_lens = lenses
-            .iter()
-            .find(|lens| lens.name == "Remote Blocked")
-            .expect("blocked lens");
-        tessera_core::pairing::approve_remote(
-            &vault,
-            &allowed_lens.id,
-            "remote integration test",
-            "Remote Test Agent",
-            10,
-            &client_id,
-        )
-        .expect("remote approval");
-        drop(vault);
+        let (allowed_lens, blocked_lens) = {
+            let vault = state.open_vault().expect("vault");
+            let lenses = lens::list(&vault).expect("lenses");
+            let allowed_lens = lenses
+                .iter()
+                .find(|lens| lens.name == "Remote Allowed")
+                .expect("allowed lens")
+                .clone();
+            let blocked_lens = lenses
+                .iter()
+                .find(|lens| lens.name == "Remote Blocked")
+                .expect("blocked lens")
+                .clone();
+            tessera_core::pairing::approve_remote(
+                &vault,
+                &allowed_lens.id,
+                "remote integration test",
+                "Remote Test Agent",
+                10,
+                &client_id,
+            )
+            .expect("remote approval");
+            (allowed_lens, blocked_lens)
+        };
 
         let verifier = "a-standards-compliant-pkce-verifier-with-more-than-forty-three-chars";
         let challenge = pkce_challenge(verifier);
@@ -741,18 +810,18 @@ mod tests {
             .expect("get");
         assert_eq!(get_without_sse.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-        let vault = state.open_vault().expect("verify vault");
-        assert_eq!(tessera_core::receipt::verify(&vault).expect("receipts"), 1);
-        let receipts = tessera_core::receipt::list(&vault).expect("list receipts");
-        assert_eq!(
-            receipts[0].pairing_id.as_deref(),
-            Some(receipts[0].agent.agent_id.as_str())
-        );
-        drop(receipts);
-        let mut changed_lens = lens::get(&vault, &allowed_lens.id).expect("lens");
-        changed_lens.allow_metadata = false;
-        lens::update(&vault, &changed_lens).expect("change lens");
-        drop(vault);
+        {
+            let vault = state.open_vault().expect("verify vault");
+            assert_eq!(tessera_core::receipt::verify(&vault).expect("receipts"), 1);
+            let receipts = tessera_core::receipt::list(&vault).expect("list receipts");
+            assert_eq!(
+                receipts[0].pairing_id.as_deref(),
+                Some(receipts[0].agent.agent_id.as_str())
+            );
+            let mut changed_lens = lens::get(&vault, &allowed_lens.id).expect("lens");
+            changed_lens.allow_metadata = false;
+            lens::update(&vault, &changed_lens).expect("change lens");
+        }
 
         let stale = app
             .oneshot(call(&allowed_artifact, 5))
@@ -763,5 +832,40 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "a token never inherits a changed lens policy"
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_lock_signal_blocks_http_immediately_and_idle_server_exits() {
+        let (_dir, state, _allowed, _blocked) = fixture();
+        assert!(!state.lock_requested());
+        {
+            let vault = state.open_vault().expect("vault");
+            tessera_core::session::lock_all(&vault).expect("lock");
+        }
+        assert!(state.lock_requested());
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"jsonrpc":"2.0","id":1,"method":"initialize"}).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::LOCKED);
+
+        let (_dir, idle_state, _allowed, _blocked) = fixture();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_lock(idle_state, Duration::from_millis(50)),
+        )
+        .await
+        .expect("idle server exits");
     }
 }

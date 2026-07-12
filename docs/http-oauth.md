@@ -46,11 +46,12 @@ endpoints; terminate TLS at a local/reverse proxy and pass its canonical HTTPS
 origin:
 
 ```bash
-TESSERA_PASSPHRASE='...' cargo run -p tessera-guardian -- \
+cargo run -p tessera-guardian -- \
   --vault /private/Vault.tessera \
   --http \
   --bind 127.0.0.1:8787 \
-  --public-url https://tessera.example
+  --public-url https://tessera.example \
+  --prompt-passphrase
 ```
 
 For a non-loopback listener, both the explicit flag and HTTPS public origin are
@@ -65,6 +66,12 @@ The cleartext listener must not be exposed directly; the HTTPS terminator is
 the external security boundary. Configure `--allow-origin` for each additional
 browser origin. Requests with an unapproved `Origin` receive HTTP 403, which
 prevents DNS-rebinding access to a local guardian.
+
+For non-interactive service launch, replace `--prompt-passphrase` with the
+recommended one-shot `--passphrase-fd` flow in
+[`guardian-unlock.md`](guardian-unlock.md). The Guardian does not read a
+passphrase environment variable or retain the passphrase after opening the
+vault.
 
 ## Client and owner flow
 

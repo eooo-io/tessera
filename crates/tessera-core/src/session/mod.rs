@@ -200,6 +200,46 @@ pub fn revoke_all(vault: &Vault) -> Result<usize, SessionError> {
     Ok(changed)
 }
 
+/// Current durable explicit-lock generation. A running Guardian captures this
+/// at unlock and exits when the owner advances it.
+pub fn lock_generation(vault: &Vault) -> Result<u64, SessionError> {
+    Ok(vault.conn().query_row(
+        "SELECT generation FROM guardian_lock_state WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as u64)
+}
+
+/// Explicitly lock every running Guardian: revoke active sessions and advance
+/// the generation in one transaction. Guardians observe the change, exit, and
+/// drop their zeroizing DEK.
+pub fn lock_all(vault: &Vault) -> Result<usize, SessionError> {
+    let conn = vault.conn();
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<usize, SessionError> {
+        let changed = conn.execute(
+            "UPDATE sessions SET status = 'revoked', ended_at = ?1 WHERE status = 'active'",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        conn.execute(
+            "UPDATE guardian_lock_state
+             SET generation = generation + 1, updated_at = ?1 WHERE singleton = 1",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(changed)
+    })();
+    match result {
+        Ok(changed) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(changed)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 /// List all sessions, newest first.
 pub fn list(vault: &Vault) -> Result<Vec<SessionRecord>, SessionError> {
     let mut stmt = vault.conn().prepare(&format!(
@@ -293,6 +333,25 @@ mod tests {
         assert_eq!(revoke_all(&vault).expect("revoke_all"), 1);
         assert_eq!(status(&vault, &a.id).expect("a"), SessionStatus::Revoked);
         assert_eq!(status(&vault, &b.id).expect("b"), SessionStatus::Closed);
+    }
+
+    #[test]
+    fn explicit_lock_revokes_sessions_and_advances_generation() {
+        let (_dir, vault, p) = vault_with_pairing(60);
+        let session = start(&vault, &p).expect("session");
+        let before = lock_generation(&vault).expect("before");
+        assert_eq!(lock_all(&vault).expect("lock"), 1);
+        assert_eq!(
+            lock_generation(&vault).expect("after"),
+            before + 1,
+            "generation wakes every Guardian process"
+        );
+        assert_eq!(
+            status(&vault, &session.id).expect("status"),
+            SessionStatus::Revoked
+        );
+        assert_eq!(lock_all(&vault).expect("lock again"), 0);
+        assert_eq!(lock_generation(&vault).expect("again"), before + 2);
     }
 
     #[test]

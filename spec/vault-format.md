@@ -227,6 +227,11 @@ with a database trigger. Only `revoked_at` may change. Guardian calls compare
 the stored revision with the current lens before disclosure; an edited or
 deleted lens requires a new owner-approved pairing.
 
+Migration 0014 adds the singleton `guardian_lock_state` generation. An owner
+`guardian lock` operation atomically revokes active sessions and advances that
+generation. Running Guardians exit when it differs from the generation they
+captured at unlock; this is process coordination metadata, not key material.
+
 ## 7. `inbox/`
 
 Plaintext staging area. Files here are **not part of the vault's data set**:

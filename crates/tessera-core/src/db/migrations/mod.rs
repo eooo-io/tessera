@@ -31,6 +31,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0013_pairing_grant_version",
         include_str!("0013_pairing_grant_version.sql"),
     ),
+    (
+        "0014_guardian_lock_generation",
+        include_str!("0014_guardian_lock_generation.sql"),
+    ),
 ];
 
 /// Number of migrations this build knows about.

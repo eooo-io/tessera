@@ -35,12 +35,25 @@ fn vault_with_lens() -> (tempfile::TempDir, std::path::PathBuf, LensId) {
 }
 
 fn guardian(vault: &std::path::Path, pairing: &str) -> Command {
+    let passphrase_file = vault
+        .parent()
+        .expect("vault parent")
+        .join("guardian-passphrase");
+    std::fs::write(&passphrase_file, "pass\n").expect("write passphrase file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&passphrase_file, std::fs::Permissions::from_mode(0o600))
+            .expect("private passphrase permissions");
+    }
     let mut cmd = Command::new(GUARDIAN);
     cmd.arg("--vault")
         .arg(vault)
         .arg("--pairing")
         .arg(pairing)
-        .env("TESSERA_PASSPHRASE", "pass")
+        .arg("--passphrase-file")
+        .arg(passphrase_file)
+        .env_remove("TESSERA_PASSPHRASE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -139,6 +152,39 @@ fn session_refused_for_unknown_pairing() {
 }
 
 #[test]
+fn guardian_ignores_environment_passphrase_and_never_prints_secret_input() {
+    let (dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing = pairing::approve(&vault, &lens_id, "test", "agent", 60).expect("pairing");
+    drop(vault);
+    let marker = "WRONG-SECRET-MUST-NEVER-APPEAR-49";
+    let secret = dir.path().join("wrong-passphrase");
+    std::fs::write(&secret, marker).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
+            .expect("permissions");
+    }
+    let output = Command::new(GUARDIAN)
+        .arg("--vault")
+        .arg(&path)
+        .arg("--pairing")
+        .arg(&pairing.id)
+        .arg("--passphrase-file")
+        .arg(&secret)
+        .env("TESSERA_PASSPHRASE", "pass")
+        .output()
+        .expect("guardian");
+    assert!(
+        !output.status.success(),
+        "environment must not unlock Guardian"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(marker));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
+}
+
+#[test]
 fn session_refused_for_revoked_pairing() {
     let (_dir, path, lens_id) = vault_with_lens();
     let vault = Vault::open(&path, "pass").expect("open");
@@ -214,6 +260,68 @@ fn lens_change_makes_existing_stdio_credential_stale_on_next_call() {
         },
         "changed after pairing approval",
     );
+}
+
+#[test]
+fn explicit_guardian_lock_exits_stdio_without_waiting_for_another_call() {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "declared task", "local config", 60).expect("approve");
+    drop(vault);
+
+    let mut child = guardian(&path, &pairing.id).spawn().expect("spawn");
+    let mut input = child.stdin.take().expect("stdin");
+    let mut output = BufReader::new(child.stdout.take().expect("stdout"));
+    writeln!(
+        input,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+    )
+    .expect("initialize");
+    input.flush().expect("flush");
+    let mut line = String::new();
+    output.read_line(&mut line).expect("read initialize");
+
+    let vault = Vault::open(&path, "pass").expect("reopen");
+    assert_eq!(session::lock_all(&vault).expect("lock"), 1);
+    drop(vault);
+    let started = std::time::Instant::now();
+    let status = child.wait().expect("guardian exits");
+    assert!(status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    drop(input);
+    drop(output);
+
+    let mut restarted = guardian(&path, &pairing.id).spawn().expect("restart");
+    restarted
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"initialize\",\"params\":{}}\n")
+        .expect("initialize after unlock");
+    let restarted_output = restarted.wait_with_output().expect("restarted output");
+    assert!(restarted_output.status.success());
+    assert!(String::from_utf8_lossy(&restarted_output.stdout).contains("\"id\":9"));
+}
+
+#[test]
+fn stdio_idle_timeout_exits_and_drops_the_unlocked_vault() {
+    let (_dir, path, lens_id) = vault_with_lens();
+    let vault = Vault::open(&path, "pass").expect("open");
+    let pairing =
+        pairing::approve(&vault, &lens_id, "idle test", "local config", 60).expect("approve");
+    drop(vault);
+
+    let started = std::time::Instant::now();
+    let mut command = guardian(&path, &pairing.id);
+    command.arg("--idle-lock-seconds").arg("1");
+    let mut child = command.spawn().expect("guardian");
+    let input = child.stdin.take().expect("keep stdin open");
+    let output = child.wait_with_output().expect("wait");
+    drop(input);
+    assert!(output.status.success());
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
 
 /// A vault with one live, summarized doc and a summary lens scoped to its

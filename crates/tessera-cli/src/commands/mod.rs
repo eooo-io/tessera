@@ -7,6 +7,7 @@ use anyhow::{bail, Context};
 use clap::Subcommand;
 use tessera_core::crypto::KdfParams;
 use tessera_core::{space, SpaceId, Vault};
+use zeroize::Zeroizing;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -93,6 +94,11 @@ pub enum Command {
     Guardian {
         #[command(subcommand)]
         action: GuardianCommand,
+    },
+    /// Manage portable recovery/rotation keyslots
+    Key {
+        #[command(subcommand)]
+        action: KeyCommand,
     },
     /// Run golden-set retrieval evaluation (exits non-zero below gate)
     Eval {
@@ -215,10 +221,25 @@ pub enum SessionsCommand {
 
 #[derive(Subcommand)]
 pub enum GuardianCommand {
-    /// Revoke all active sessions; running guardians drop their key on the next call
+    /// Signal every running Guardian to exit and drop its unlocked key
     Lock,
     /// Show active sessions
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum KeyCommand {
+    /// Show keyslot indexes (never key material)
+    List,
+    /// Add a new recovery/rotation passphrase
+    Add,
+    /// Remove a keyslot after verifying another slot opens the vault
+    Remove {
+        index: usize,
+        /// Confirm the recovery-sensitive removal
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -267,18 +288,28 @@ pub fn resolve_vault_path(flag: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./vault.tessera"))
 }
 
-/// Passphrase: $TESSERA_PASSPHRASE, else interactive prompt.
-///
-/// The prompt currently echoes input; no-echo entry lands with CLI polish.
-fn passphrase() -> anyhow::Result<String> {
+/// Owner CLI passphrase: explicit automation environment fallback, otherwise
+/// a no-echo prompt on the controlling terminal. The returned buffer zeroizes
+/// on drop after the vault has derived/unwrapped its DEK.
+fn passphrase() -> anyhow::Result<Zeroizing<String>> {
     if let Ok(pass) = std::env::var("TESSERA_PASSPHRASE") {
-        return Ok(pass);
+        return Ok(Zeroizing::new(pass));
     }
-    print!("Vault passphrase: ");
-    std::io::stdout().flush()?;
-    let mut pass = String::new();
-    std::io::stdin().read_line(&mut pass)?;
-    Ok(pass.trim_end_matches(['\r', '\n']).to_string())
+    Ok(Zeroizing::new(rpassword::prompt_password(
+        "Vault passphrase: ",
+    )?))
+}
+
+fn confirmed_new_passphrase() -> anyhow::Result<Zeroizing<String>> {
+    let first = Zeroizing::new(rpassword::prompt_password("New keyslot passphrase: ")?);
+    if first.is_empty() {
+        bail!("refusing an empty keyslot passphrase");
+    }
+    let second = Zeroizing::new(rpassword::prompt_password("Confirm new passphrase: ")?);
+    if first.as_str() != second.as_str() {
+        bail!("new keyslot passphrases do not match");
+    }
+    Ok(first)
 }
 
 /// KDF parameters. `TESSERA_KDF_PROFILE=insecure-test` selects deliberately
@@ -1135,10 +1166,10 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
             let vault = open_vault(&vault_path)?;
             match action {
                 GuardianCommand::Lock => {
-                    let n = session::revoke_all(&vault)?;
+                    let n = session::lock_all(&vault)?;
                     println!(
-                        "Locked: revoked {n} active session(s). Running guardians drop \
-                         their key on the next tool call."
+                        "Lock signaled: revoked {n} active session(s). Running guardians \
+                         exit and drop their key within the monitoring interval."
                     );
                     Ok(())
                 }
@@ -1156,6 +1187,37 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                             s.id, s.lens_id, s.purpose, s.agent_name, s.expires_at
                         );
                     }
+                    Ok(())
+                }
+            }
+        }
+        Command::Key { action } => {
+            let vault = open_vault(&vault_path)?;
+            match action {
+                KeyCommand::List => {
+                    let count = vault.keyslot_count()?;
+                    println!("{count} keyslot(s):");
+                    for index in 0..count {
+                        println!("  {index}");
+                    }
+                    Ok(())
+                }
+                KeyCommand::Add => {
+                    let new_passphrase = confirmed_new_passphrase()?;
+                    let index = vault.add_keyslot(new_passphrase.as_str(), &kdf_params())?;
+                    println!(
+                        "Added keyslot {index}. Verify it opens a copied vault before removing an older slot."
+                    );
+                    Ok(())
+                }
+                KeyCommand::Remove { index, yes } => {
+                    if !yes {
+                        bail!(
+                            "keyslot removal can make the vault unrecoverable; verify another slot, then re-run with --yes"
+                        );
+                    }
+                    vault.remove_keyslot(index)?;
+                    println!("Removed keyslot {index}.");
                     Ok(())
                 }
             }
