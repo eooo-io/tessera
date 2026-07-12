@@ -105,6 +105,15 @@ errors remain auditable. Error messages are plaintext metadata and MUST NOT
 contain source content, credentials, or secrets. The database never contains
 plaintext artifact content or receipt JSON.
 
+Migration 0016 adds `transcript_turns`, keyed to an encrypted derived-text
+record. Each row preserves the turn index, exact byte range in normalized
+derived text, and optional source-media start/end milliseconds. Transcript
+content, speaker names, and source cue ids remain in encrypted blobs. Timestamps
+and byte offsets are plaintext metadata and therefore fall under the
+metadata-hardening work tracked separately for v0.1. Chunks over transcript
+derivations pack whole turn ranges and do not split a speaker turn to meet the
+target token count.
+
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated

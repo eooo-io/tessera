@@ -452,7 +452,9 @@ mod tests {
             ),
             ("e.png", "image/png"),
             ("f.jpg", "image/jpeg"),
-            ("g.unknownext", "application/octet-stream"),
+            ("g.vtt", "text/vtt"),
+            ("h.srt", "application/x-subrip"),
+            ("i.unknownext", "application/octet-stream"),
         ] {
             assert_eq!(media_type_for(Path::new(name)), expected, "for {name}");
         }

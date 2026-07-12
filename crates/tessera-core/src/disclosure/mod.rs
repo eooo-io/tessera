@@ -59,6 +59,8 @@ pub enum DisclosureError {
     Blob(#[from] BlobError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("transcript error: {0}")]
+    Transcript(#[from] crate::transcript::TranscriptError),
 }
 
 /// Semantic type of disclosed evidence. Historical code and tool events are
@@ -70,6 +72,7 @@ pub enum EvidenceContentKind {
     HistoricalCode,
     HistoricalToolCall,
     HistoricalToolResult,
+    TranscriptTurn,
 }
 
 impl EvidenceContentKind {
@@ -80,6 +83,7 @@ impl EvidenceContentKind {
             Self::HistoricalCode => "historical_code",
             Self::HistoricalToolCall => "historical_tool_call",
             Self::HistoricalToolResult => "historical_tool_result",
+            Self::TranscriptTurn => "transcript_turn",
         }
     }
 }
@@ -101,6 +105,8 @@ pub struct RenderedContext {
     /// The exact `[start, end)` byte range of the derived text disclosed
     /// verbatim (excerpt/full). `None` in summary mode.
     pub disclosed_range: Option<(u64, u64)>,
+    /// Source-media time covered by the disclosed transcript turns.
+    pub timestamp_range: Option<crate::transcript::TimestampRange>,
     /// True only when the full derived text was actually returned. The receipt
     /// layer logs this loudly.
     pub full_disclosure: bool,
@@ -138,6 +144,7 @@ pub fn render(
                 body,
                 bytes_disclosed: 0,
                 disclosed_range: None,
+                timestamp_range: None,
                 full_disclosure: false,
             })
         }
@@ -152,28 +159,50 @@ pub fn render(
             let max = lens.max_quote_chars.unwrap_or(u32::MAX) as usize;
             let excerpt = bounded_text(slice, max);
             let bytes = excerpt.len() as u64;
+            let timestamp_range = crate::transcript::timestamp_range_for_chunk_range(
+                vault,
+                &result.chunk_id,
+                start as u64,
+                start as u64 + bytes,
+            )?;
             Ok(RenderedContext {
                 artifact_id: result.artifact_id.clone(),
-                content_kind: EvidenceContentKind::DocumentText,
+                content_kind: if timestamp_range.is_some() {
+                    EvidenceContentKind::TranscriptTurn
+                } else {
+                    EvidenceContentKind::DocumentText
+                },
                 title,
                 mode,
                 body: excerpt,
                 bytes_disclosed: bytes,
                 disclosed_range: Some((start as u64, start as u64 + bytes)),
+                timestamp_range,
                 full_disclosure: false,
             })
         }
         DisclosureMode::Full => {
             let derived = read_chunk_derived(vault, &result.chunk_id)?;
             let bytes = derived.len() as u64;
+            let timestamp_range = crate::transcript::timestamp_range_for_chunk_range(
+                vault,
+                &result.chunk_id,
+                0,
+                bytes,
+            )?;
             Ok(RenderedContext {
                 artifact_id: result.artifact_id.clone(),
-                content_kind: EvidenceContentKind::DocumentText,
+                content_kind: if timestamp_range.is_some() {
+                    EvidenceContentKind::TranscriptTurn
+                } else {
+                    EvidenceContentKind::DocumentText
+                },
                 title,
                 mode,
                 body: derived,
                 bytes_disclosed: bytes,
                 disclosed_range: Some((0, bytes)),
+                timestamp_range,
                 full_disclosure: true,
             })
         }
@@ -256,36 +285,59 @@ pub fn render_item(
                 body,
                 bytes_disclosed: 0,
                 disclosed_range: None,
+                timestamp_range: None,
                 full_disclosure: false,
             })
         }
         DisclosureMode::Excerpt => {
-            let derived = read_artifact_derived(vault, artifact_id)?;
+            let (derived_text_id, derived) = read_artifact_derived(vault, artifact_id)?;
             let max = lens.max_quote_chars.unwrap_or(u32::MAX) as usize;
             let excerpt = bounded_text(&derived, max);
             let bytes = excerpt.len() as u64;
+            let timestamp_range = crate::transcript::timestamp_range_for_derived_range(
+                vault,
+                &derived_text_id,
+                0,
+                bytes,
+            )?;
             Ok(RenderedContext {
                 artifact_id: artifact_id.clone(),
-                content_kind: EvidenceContentKind::DocumentText,
+                content_kind: if timestamp_range.is_some() {
+                    EvidenceContentKind::TranscriptTurn
+                } else {
+                    EvidenceContentKind::DocumentText
+                },
                 title,
                 mode,
                 body: excerpt,
                 bytes_disclosed: bytes,
                 disclosed_range: Some((0, bytes)),
+                timestamp_range,
                 full_disclosure: false,
             })
         }
         DisclosureMode::Full => {
-            let derived = read_artifact_derived(vault, artifact_id)?;
+            let (derived_text_id, derived) = read_artifact_derived(vault, artifact_id)?;
             let bytes = derived.len() as u64;
+            let timestamp_range = crate::transcript::timestamp_range_for_derived_range(
+                vault,
+                &derived_text_id,
+                0,
+                bytes,
+            )?;
             Ok(RenderedContext {
                 artifact_id: artifact_id.clone(),
-                content_kind: EvidenceContentKind::DocumentText,
+                content_kind: if timestamp_range.is_some() {
+                    EvidenceContentKind::TranscriptTurn
+                } else {
+                    EvidenceContentKind::DocumentText
+                },
                 title,
                 mode,
                 body: derived,
                 bytes_disclosed: bytes,
                 disclosed_range: Some((0, bytes)),
+                timestamp_range,
                 full_disclosure: true,
             })
         }
@@ -297,23 +349,26 @@ pub fn render_item(
 fn read_artifact_derived(
     vault: &Vault,
     artifact_id: &ArtifactId,
-) -> Result<String, DisclosureError> {
-    let blob_hash: String = vault
+) -> Result<(String, String), DisclosureError> {
+    let (derived_text_id, blob_hash): (String, String) = vault
         .conn()
         .query_row(
-            "SELECT dt.blob_hash FROM derived_text dt
+            "SELECT dt.id, dt.blob_hash FROM derived_text dt
              JOIN artifact_versions av ON av.id = dt.artifact_version_id
              WHERE av.artifact_id = ?1
              ORDER BY av.version DESC, dt.created_at DESC LIMIT 1",
             [artifact_id.0.as_str()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => DisclosureError::NoText(artifact_id.0.clone()),
             other => DisclosureError::Database(other),
         })?;
     let bytes = vault.blobs().get(vault.dek()?, &BlobHash(blob_hash))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok((
+        derived_text_id,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))
 }
 
 /// Decrypt the derived text that a chunk points into.
@@ -396,6 +451,7 @@ mod tests {
             chunk_id: first.id.clone(),
             relevance_score: 1.0,
             byte_range: (first.byte_offset_start, first.byte_offset_end),
+            timestamp_range: None,
         };
         let derived_text = extract::read_derived_text(&vault, &derived).expect("read");
         (dir, vault, result, derived_text)

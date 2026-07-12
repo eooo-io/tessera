@@ -550,6 +550,7 @@ impl<'v> Session<'v> {
                         SearchError::Index(_) => "index_error",
                         SearchError::Vault(_) => "vault_error",
                         SearchError::Database(_) => "database_error",
+                        SearchError::Transcript(_) => "transcript_error",
                     };
                     self.receipt.queries.push(QueryRecord {
                         query_id: format!("qry_{}", ulid::Ulid::new()),
