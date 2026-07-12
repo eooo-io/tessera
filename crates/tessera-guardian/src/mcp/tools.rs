@@ -261,6 +261,7 @@ fn evidence_result(
                         "artifact_id": context.artifact_id.0,
                         "disclosed_range": range,
                         "timestamp_range": timestamp_range,
+                        "source_url": context.source_url,
                         "content_hash": blake3::hash(context.body.as_bytes()).to_hex().to_string(),
                         "exact_disclosure_recorded_in_receipt": true,
                     },
@@ -560,6 +561,24 @@ mod tests {
             .as_str()
             .expect("text")
             .contains("Alice: We should preserve"));
+        assert_eq!(
+            result["structuredContent"]["trust"]["instruction_authority"],
+            "none"
+        );
+        assert_conforms(&result);
+    }
+
+    #[test]
+    fn web_source_url_is_emitted_only_as_untrusted_citation_metadata() {
+        let f = fixture(DisclosureMode::Excerpt);
+        let mut receipt = open_receipt(&f);
+        let mut contexts = receipt.get_item(&f.art_id).expect("item");
+        contexts.source_url = Some("https://example.com/article".into());
+        let result = evidence_result(&f.gsession, "vault_get_item", &[contexts]);
+        assert_eq!(
+            result["structuredContent"]["evidence"][0]["citation"]["source_url"],
+            "https://example.com/article"
+        );
         assert_eq!(
             result["structuredContent"]["trust"]["instruction_authority"],
             "none"

@@ -124,6 +124,24 @@ target size. Owner CLI results and Guardian citations include the covered media
 time range; source text remains untrusted evidence under the same lens,
 quarantine, disclosure, and receipt path as documents.
 
+## Web clipping
+
+`tessera inbox add-url <url>` performs one explicit, bounded article fetch and
+stages Readability-extracted Markdown. It does not crawl, execute page scripts,
+or follow redirects. Fetches accept only HTTP(S), reject credentials and any
+DNS result in a non-public address range, pin the validated address for the
+request, require an HTML response, and stop at 10 MiB or 30 seconds. When a
+site redirects, pass the canonical destination URL explicitly.
+
+Run `tessera inbox process --space <id>` after staging, then review the pending
+artifact normally. The requested/final URL, extracted title, publication date,
+and fetch time remain attached to the exact artifact version. Owner results and
+Guardian citations show the source URL only when metadata disclosure is
+allowed. URLs and web-source metadata are plaintext database metadata under the
+known v1 limitation tracked by #50. Fetched HTML exists only in a bounded
+temporary directory; the staged Markdown is encrypted before downstream
+extraction by the normal intake pipeline.
+
 ## Relevance minimization
 
 Semantic queries use cosine similarity over normalized MiniLM vectors and

@@ -40,6 +40,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0016_transcript_turns",
         include_str!("0016_transcript_turns.sql"),
     ),
+    ("0017_web_sources", include_str!("0017_web_sources.sql")),
 ];
 
 /// Number of migrations this build knows about.

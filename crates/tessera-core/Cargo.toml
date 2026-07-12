@@ -20,6 +20,8 @@ ort = { workspace = true }
 ndarray = { workspace = true }
 tokenizers = { workspace = true }
 pdf-extract = { workspace = true }
+dom_smoothie = { workspace = true }
+url = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }

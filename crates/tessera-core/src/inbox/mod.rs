@@ -27,6 +27,8 @@ pub enum InboxError {
     Blob(#[from] BlobError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("web clip error: {0}")]
+    Web(#[from] crate::web::WebError),
 }
 
 /// Outcome of one `process` run. Failures are per-item and never abort the
@@ -77,6 +79,11 @@ fn add_with_copy(
                 .unwrap_or_default();
             target = inbox.join(format!("{stem}-{counter}{ext}"));
             counter += 1;
+        }
+        if let Some(filename) = target.file_name().and_then(|name| name.to_str()) {
+            // A manual file must never inherit metadata from an interrupted
+            // web clip that happened to reserve the same staging filename.
+            crate::web::discard_staged(vault, filename)?;
         }
         let partial = inbox.join(format!(
             ".{}.{}.partial",
@@ -146,6 +153,10 @@ fn intake_one(
         return Err(InboxError::NotAFile(staged.to_path_buf()));
     }
     let content = std::fs::read(staged)?;
+    let filename = staged
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unnamed".to_owned());
     let hash_hex = blake3::hash(&content).to_hex().to_string();
 
     // Dedup: same content already versioned anywhere in the vault.
@@ -159,6 +170,7 @@ fn intake_one(
         .map_err(ArtifactError::Database)?;
     if already > 0 {
         std::fs::remove_file(staged)?;
+        crate::web::discard_staged(vault, &filename)?;
         return Ok(None);
     }
 
@@ -166,10 +178,6 @@ fn intake_one(
     // downstream stage (extraction etc.) ever sees it.
     let blob_hash = vault.blobs().put(dek, &content)?;
 
-    let filename = staged
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "unnamed".to_owned());
     vault
         .conn()
         .execute_batch("BEGIN IMMEDIATE")
@@ -182,7 +190,9 @@ fn intake_one(
             media_type_for(staged),
             Sensitivity::default(),
         )?;
-        artifact::record_version(vault, &artifact_id, &blob_hash, content.len() as u64)?;
+        let version =
+            artifact::record_version(vault, &artifact_id, &blob_hash, content.len() as u64)?;
+        crate::web::attach_staged_to_version(vault, &filename, &version.id)?;
         vault
             .conn()
             .execute_batch("COMMIT")
