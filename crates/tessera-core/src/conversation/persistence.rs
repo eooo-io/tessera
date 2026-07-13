@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -174,6 +175,65 @@ pub fn persist_archive(
     archive: &ConversationArchive,
     config: &ConversationPersistenceConfig,
 ) -> Result<Vec<PersistedConversation>, ConversationPersistenceError> {
+    persist_archive_inner(
+        vault,
+        space_id,
+        source_artifact_version_id,
+        archive,
+        config,
+        None,
+        false,
+    )
+}
+
+/// Persist only selected source conversations while retaining the full
+/// validated normal form as the encrypted archive derivation. Existing archive
+/// metadata and exact committed derivations may be reconciled by a deterministic
+/// resume.
+pub fn persist_archive_selection(
+    vault: &Vault,
+    space_id: &SpaceId,
+    source_artifact_version_id: &str,
+    archive: &ConversationArchive,
+    config: &ConversationPersistenceConfig,
+    source_conversation_ids: &[String],
+) -> Result<Vec<PersistedConversation>, ConversationPersistenceError> {
+    let selected: BTreeSet<&str> = source_conversation_ids.iter().map(String::as_str).collect();
+    if selected.len() != source_conversation_ids.len() {
+        return Err(ConversationPersistenceError::Invariant(
+            "conversation persistence selection contains duplicate ids".into(),
+        ));
+    }
+    let available: BTreeSet<&str> = archive
+        .conversations
+        .iter()
+        .map(|conversation| conversation.conversation_id.as_str())
+        .collect();
+    if selected.difference(&available).next().is_some() {
+        return Err(ConversationPersistenceError::Invariant(
+            "conversation persistence selection contains an unknown id".into(),
+        ));
+    }
+    persist_archive_inner(
+        vault,
+        space_id,
+        source_artifact_version_id,
+        archive,
+        config,
+        Some(&selected),
+        true,
+    )
+}
+
+fn persist_archive_inner(
+    vault: &Vault,
+    space_id: &SpaceId,
+    source_artifact_version_id: &str,
+    archive: &ConversationArchive,
+    config: &ConversationPersistenceConfig,
+    selected: Option<&BTreeSet<&str>>,
+    allow_existing_archive: bool,
+) -> Result<Vec<PersistedConversation>, ConversationPersistenceError> {
     archive.validate()?;
     validate_config(config)?;
 
@@ -226,19 +286,35 @@ pub fn persist_archive(
             &archive.source.normalizer.version,
         ],
     );
-    let exists: bool = vault.conn().query_row(
-        "SELECT EXISTS(SELECT 1 FROM conversation_archives WHERE id = ?1)",
-        [&archive_id],
-        |row| row.get(0),
-    )?;
-    if exists {
+    let existing: Option<(String, String)> = vault
+        .conn()
+        .query_row(
+            "SELECT source_artifact_version_id, normal_form_blob_hash
+         FROM conversation_archives WHERE id = ?1",
+            [&archive_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if existing.is_some() && !allow_existing_archive {
         return Err(ConversationPersistenceError::AlreadyPersisted(archive_id));
     }
 
     let archive_bytes = serde_json::to_vec(archive)?;
     let normal_form_hash = vault.blobs().put(vault.dek()?, &archive_bytes)?.0;
+    if let Some((existing_source_version, existing_normal_form_hash)) = &existing {
+        if existing_source_version != source_artifact_version_id
+            || existing_normal_form_hash != &normal_form_hash
+        {
+            return Err(ConversationPersistenceError::Invariant(format!(
+                "archive {archive_id} resume metadata does not match the committed source"
+            )));
+        }
+    }
     let mut prepared = Vec::with_capacity(archive.conversations.len());
     for conversation in &archive.conversations {
+        if selected.is_some_and(|ids| !ids.contains(conversation.conversation_id.as_str())) {
+            continue;
+        }
         let id = stable_id("conv", &[&archive_id, &conversation.conversation_id]);
         let artifact_id = ArtifactId(stable_id("art", &[&id]));
         let envelope = ConversationEnvelope {
@@ -265,30 +341,36 @@ pub fn persist_archive(
     vault.conn().execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         let now = chrono::Utc::now().to_rfc3339();
-        vault.conn().execute(
-            "INSERT INTO conversation_archives
-             (id, source_artifact_version_id, schema_version, source_product, source_hash,
-              normal_form_blob_hash, parser_name, parser_version, normalizer_name,
-              normalizer_version, locality, processed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![
-                archive_id,
-                source_artifact_version_id,
-                archive.schema_version,
-                source_product_str(archive.source.product),
-                archive.source.source_hash,
-                normal_form_hash,
-                archive.source.parser.name,
-                archive.source.parser.version,
-                archive.source.normalizer.name,
-                archive.source.normalizer.version,
-                config.locality.as_str(),
-                now,
-            ],
-        )?;
+        if existing.is_none() {
+            vault.conn().execute(
+                "INSERT INTO conversation_archives
+                 (id, source_artifact_version_id, schema_version, source_product, source_hash,
+                  normal_form_blob_hash, parser_name, parser_version, normalizer_name,
+                  normalizer_version, locality, processed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    archive_id,
+                    source_artifact_version_id,
+                    archive.schema_version,
+                    source_product_str(archive.source.product),
+                    archive.source.source_hash,
+                    normal_form_hash,
+                    archive.source.parser.name,
+                    archive.source.parser.version,
+                    archive.source.normalizer.name,
+                    archive.source.normalizer.version,
+                    config.locality.as_str(),
+                    now,
+                ],
+            )?;
+        }
 
         let mut persisted = Vec::with_capacity(prepared.len());
         for item in &prepared {
+            if let Some(existing) = existing_persisted(vault, item, config)? {
+                persisted.push(existing);
+                continue;
+            }
             let conversation = &item.envelope.conversation;
             let filename = format!("conversation-{}.json", &item.canonical_hash[..16]);
             vault.conn().execute(
@@ -355,6 +437,83 @@ pub fn persist_archive(
             Err(error)
         }
     }
+}
+
+fn existing_persisted(
+    vault: &Vault,
+    item: &PreparedConversation,
+    config: &ConversationPersistenceConfig,
+) -> Result<Option<PersistedConversation>, ConversationPersistenceError> {
+    let row: Option<(String, String, String, String, String, String)> = vault
+        .conn()
+        .query_row(
+            "SELECT av.artifact_id, c.artifact_version_id, c.canonical_hash,
+                    cd.derived_text_id, cd.normalized_blob_hash, cd.derivation_hash
+             FROM conversations c
+             JOIN artifact_versions av ON av.id = c.artifact_version_id
+             JOIN conversation_derivations cd ON cd.conversation_id = c.id
+             WHERE c.id = ?1 AND cd.renderer_name = ?2 AND cd.renderer_version = ?3
+               AND cd.chunker_name = ?4 AND cd.chunker_version = ?5
+               AND cd.target_tokens = ?6 AND cd.overlap_tokens = ?7",
+            rusqlite::params![
+                item.id,
+                config.renderer.name,
+                config.renderer.version,
+                config.chunker.name,
+                config.chunker.version,
+                config.chunk_params.target_tokens as i64,
+                config.chunk_params.overlap_tokens as i64,
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(row) = row else {
+        let conversation_exists: bool = vault.conn().query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+            [&item.id],
+            |row| row.get(0),
+        )?;
+        if conversation_exists {
+            return Err(ConversationPersistenceError::Invariant(format!(
+                "conversation {} exists without the requested derivation",
+                item.id
+            )));
+        }
+        return Ok(None);
+    };
+    if row.1 != item.artifact_version_id
+        || row.2 != item.canonical_hash
+        || row.4 != item.normalized_hash
+    {
+        return Err(ConversationPersistenceError::Invariant(format!(
+            "conversation {} resume identity does not match committed data",
+            item.id
+        )));
+    }
+    let chunk_ids = crate::chunk::chunks_of(vault, &row.3)?
+        .into_iter()
+        .map(|chunk| chunk.id)
+        .collect();
+    Ok(Some(PersistedConversation {
+        id: item.id.clone(),
+        source_conversation_id: item.envelope.conversation.conversation_id.clone(),
+        artifact_id: ArtifactId(row.0),
+        artifact_version_id: row.1,
+        derived_text_id: row.3,
+        chunk_ids,
+        canonical_hash: row.2,
+        normalized_hash: row.4,
+        derivation_hash: row.5,
+    }))
 }
 
 /// Produce another rendering/chunk derivation for an already-persisted

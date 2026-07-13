@@ -45,6 +45,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0018_conversation_provenance",
         include_str!("0018_conversation_provenance.sql"),
     ),
+    (
+        "0019_conversation_ingestion_runs",
+        include_str!("0019_conversation_ingestion_runs.sql"),
+    ),
 ];
 
 /// Number of migrations this build knows about.

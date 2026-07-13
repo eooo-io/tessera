@@ -23,6 +23,11 @@ pub enum Command {
         #[command(subcommand)]
         action: InboxCommand,
     },
+    /// Inspect conversation ingestion runs and per-item quarantine results
+    Conversation {
+        #[command(subcommand)]
+        action: ConversationCommand,
+    },
     /// Review quarantined artifacts
     Review {
         /// Review and accept every pending artifact as one explicit batch
@@ -208,6 +213,24 @@ pub enum InboxCommand {
         /// Target space id (defaults to the sole space if only one exists)
         #[arg(long)]
         space: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConversationCommand {
+    /// List source-neutral ingestion runs, newest first
+    Runs {
+        /// Emit complete content-free run reports as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one ingestion run and every per-conversation outcome
+    Show {
+        /// Ingestion run id
+        id: String,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -875,6 +898,69 @@ fn review_batch(vault: &Vault, yes: bool, allow_incomplete: bool) -> anyhow::Res
     Ok(())
 }
 
+fn print_conversation_run(run: &tessera_core::conversation::IngestionRunReport, items: bool) {
+    println!(
+        "{}  {:?}  source={} space={} parser={}@{} normalizer={}@{} discovered={} imported={} unchanged={} updated={} quarantined={} failed={} checkpoint={} retries={}",
+        run.id,
+        run.status,
+        run.source_product.as_str(),
+        run.target_space_id,
+        run.parser.name,
+        run.parser.version,
+        run.normalizer.name,
+        run.normalizer.version,
+        run.discovered,
+        run.imported,
+        run.unchanged,
+        run.updated,
+        run.quarantined,
+        run.failed,
+        run.checkpoint_ordinal,
+        run.retry_count,
+    );
+    if let Some(summary) = &run.safe_error_summary {
+        println!(
+            "  run error: {} — {}",
+            run.error_code.as_deref().unwrap_or("unknown"),
+            terminal_safe(summary)
+        );
+    }
+    if items {
+        for item in &run.items {
+            println!(
+                "  [{}] {}  {:?}  conversation={} persisted={} previous={} retries={}",
+                item.ordinal,
+                item.id,
+                item.status,
+                terminal_safe(&item.source_conversation_id),
+                item.persisted_conversation_id.as_deref().unwrap_or("-"),
+                item.previous_persisted_conversation_id
+                    .as_deref()
+                    .unwrap_or("-"),
+                item.retry_count,
+            );
+            if let Some(summary) = &item.safe_error_summary {
+                println!(
+                    "       action: inspect the source structure and target classification; after correction, start a new run; {} — {}",
+                    item.error_code.as_deref().unwrap_or("unknown"),
+                    terminal_safe(summary)
+                );
+            }
+        }
+    }
+    match run.status {
+        tessera_core::conversation::IngestionRunStatus::Interrupted => println!(
+            "  next: resume run {} through its source adapter; completed items remain idempotent",
+            run.id
+        ),
+        tessera_core::conversation::IngestionRunStatus::Failed => println!(
+            "  next: correct or upgrade the source adapter, then start a new run; this run remains immutable evidence"
+        ),
+        tessera_core::conversation::IngestionRunStatus::Running
+        | tessera_core::conversation::IngestionRunStatus::Completed => {}
+    }
+}
+
 pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
     match command {
         Command::Init => {
@@ -959,6 +1045,33 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                     let vault = open_vault(&vault_path)?;
                     let space = resolve_space(&vault, space)?;
                     run_inbox_pipeline(&vault, &space)?;
+                    Ok(())
+                }
+            }
+        }
+        Command::Conversation { action } => {
+            let vault = open_vault(&vault_path)?;
+            match action {
+                ConversationCommand::Runs { json } => {
+                    let runs = tessera_core::conversation::list_ingestion_runs(&vault)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&runs)?);
+                    } else if runs.is_empty() {
+                        println!("No conversation ingestion runs.");
+                    } else {
+                        for run in &runs {
+                            print_conversation_run(run, false);
+                        }
+                    }
+                    Ok(())
+                }
+                ConversationCommand::Show { id, json } => {
+                    let run = tessera_core::conversation::get_ingestion_run(&vault, &id)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&run)?);
+                    } else {
+                        print_conversation_run(&run, true);
+                    }
                     Ok(())
                 }
             }

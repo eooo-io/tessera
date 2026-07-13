@@ -104,6 +104,136 @@ fn space_create_list_and_tree() {
 }
 
 #[test]
+fn conversation_run_cli_reports_actionable_per_item_results() {
+    struct Parser {
+        conversation: tessera_core::conversation::Conversation,
+        fail: bool,
+    }
+    impl tessera_core::conversation::ConversationSourceParser for Parser {
+        fn source_product(&self) -> tessera_core::conversation::SourceProduct {
+            tessera_core::conversation::SourceProduct::Chatgpt
+        }
+
+        fn parser(&self) -> tessera_core::conversation::ComponentVersion {
+            tessera_core::conversation::ComponentVersion {
+                name: "cli-test".into(),
+                version: "1".into(),
+            }
+        }
+
+        fn normalizer(&self) -> tessera_core::conversation::ComponentVersion {
+            tessera_core::conversation::ComponentVersion {
+                name: "tessera-conversation".into(),
+                version: "1".into(),
+            }
+        }
+
+        fn parse(
+            &self,
+            _source: &[u8],
+        ) -> Result<
+            Vec<tessera_core::conversation::ConversationCandidate>,
+            tessera_core::conversation::IngestionIssue,
+        > {
+            if self.fail {
+                return Err(tessera_core::conversation::IngestionIssue::ParserFailure);
+            }
+            Ok(vec![
+                tessera_core::conversation::ConversationCandidate::conversation(
+                    self.conversation.clone(),
+                ),
+                tessera_core::conversation::ConversationCandidate::quarantined(
+                    "conv_cli_bad",
+                    tessera_core::conversation::IngestionIssue::ChangedFieldType,
+                ),
+            ])
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("V.tessera");
+    tessera(&vault_path).args(["init"]).assert().success();
+    let vault = tessera_core::Vault::open(&vault_path, "test-passphrase").expect("open");
+    let space = tessera_core::space::create(&vault, "Conversation CLI", None).expect("space");
+    let source = dir.path().join("source.json");
+    std::fs::write(&source, b"synthetic source").expect("source");
+    tessera_core::inbox::add(&vault, &[source]).expect("stage");
+    let intake = tessera_core::inbox::process(&vault, &space).expect("intake");
+    let review =
+        tessera_core::review::inspect(&vault, &intake.ingested[0].1, 10).expect("source version");
+    let archive = tessera_core::conversation::ConversationArchive::from_json(include_str!(
+        "../../../tests/fixtures/conversation-tree.json"
+    ))
+    .expect("fixture");
+    let report = tessera_core::conversation::ingest(
+        &vault,
+        &space,
+        &review.artifact_version_id,
+        &Parser {
+            conversation: archive.conversations[0].clone(),
+            fail: false,
+        },
+        &tessera_core::conversation::IngestionOptions::default(),
+    )
+    .expect("ingest");
+    drop(vault);
+
+    tessera(&vault_path)
+        .args(["conversation", "runs"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(&report.id)
+                .and(predicate::str::contains("imported=1"))
+                .and(predicate::str::contains("quarantined=1")),
+        );
+    tessera(&vault_path)
+        .args(["conversation", "show", &report.id])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("conv_cli_bad")
+                .and(predicate::str::contains("changed_field_type"))
+                .and(predicate::str::contains(
+                    "action: inspect the source structure and target classification",
+                ))
+                .and(predicate::str::contains("start a new run")),
+        );
+    tessera(&vault_path)
+        .args(["conversation", "show", &report.id, "--json"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"status\": \"completed\"")
+                .and(predicate::str::contains("\"safe_error_summary\"")),
+        );
+
+    let vault = tessera_core::Vault::open(&vault_path, "test-passphrase").expect("reopen");
+    let failed = tessera_core::conversation::ingest(
+        &vault,
+        &space,
+        &review.artifact_version_id,
+        &Parser {
+            conversation: archive.conversations[0].clone(),
+            fail: true,
+        },
+        &tessera_core::conversation::IngestionOptions::default(),
+    )
+    .expect("failed report");
+    drop(vault);
+    tessera(&vault_path)
+        .args(["conversation", "show", &failed.id])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("correct or upgrade the source adapter")
+                .and(predicate::str::contains("start a new run"))
+                .and(predicate::str::contains("resume run").not())
+                .and(predicate::str::contains("synthetic source").not()),
+        );
+}
+
+#[test]
 fn inbox_add_status_process_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("V.tessera");

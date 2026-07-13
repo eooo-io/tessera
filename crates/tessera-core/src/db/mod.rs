@@ -95,6 +95,10 @@ mod tests {
             "conversation_derivations",
             "conversation_spans",
             "conversation_chunk_map",
+            "conversation_ingestion_runs",
+            "conversation_ingestion_items",
+            "conversation_ingestion_heads",
+            "conversation_ingestion_replacements",
         ] {
             let count: i64 = conn
                 .query_row(
