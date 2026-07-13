@@ -87,6 +87,14 @@ mod tests {
             "guardian_lock_state",
             "reindex_state",
             "reindex_embeddings_map",
+            "conversation_archives",
+            "conversations",
+            "conversation_source_records",
+            "conversation_nodes",
+            "conversation_content_parts",
+            "conversation_derivations",
+            "conversation_spans",
+            "conversation_chunk_map",
         ] {
             let count: i64 = conn
                 .query_row(

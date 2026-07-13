@@ -10,6 +10,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod persistence;
+
+pub use persistence::{
+    citation_for_chunk, citation_for_disclosed_range, load_conversation, persist_archive,
+    rechunk_conversation, reconstruct_cited_nodes, ConversationCitation,
+    ConversationPersistenceConfig, ConversationPersistenceError, PersistedConversation,
+    ProcessingLocality,
+};
+
 pub const SCHEMA_VERSION: &str = "tessera.conversation.v1";
 const SCHEMA_SRC: &str = include_str!("../../../spec/conversation-normal-form.schema.json");
 
@@ -437,6 +446,10 @@ impl Conversation {
 
     /// Deterministically render only the explicitly selected branch.
     pub fn render_selected_transcript(&self) -> Result<String, ConversationError> {
+        Ok(self.render_with_spans()?.text)
+    }
+
+    fn render_with_spans(&self) -> Result<RenderedConversation, ConversationError> {
         self.validate()?;
         let nodes: BTreeMap<&str, &MessageNode> = self
             .nodes
@@ -444,8 +457,11 @@ impl Conversation {
             .map(|node| (node.node_id.as_str(), node))
             .collect();
         let mut output = String::new();
+        let mut node_spans = Vec::with_capacity(self.selected_path.len());
+        let mut part_spans = Vec::new();
         for id in &self.selected_path {
             let node = nodes[id.as_str()];
+            let node_start = output.len();
             output.push_str(&format!(
                 "[{} {} {}]\n",
                 node.role.as_str(),
@@ -453,6 +469,7 @@ impl Conversation {
                 node.state.as_str()
             ));
             for part in &node.content_parts {
+                let part_start = output.len();
                 output.push_str(&format!("<{}:{}>\n", part.kind.as_str(), part.part_id));
                 if let Some(text) = &part.text {
                     output.push_str(text);
@@ -466,10 +483,47 @@ impl Conversation {
                         attachment.attachment_id, attachment.preservation
                     ));
                 }
+                part_spans.push(RenderedPartSpan {
+                    node_id: node.node_id.clone(),
+                    part_id: part.part_id.clone(),
+                    start: part_start as u64,
+                    end: output.len() as u64,
+                });
             }
+            node_spans.push(RenderedNodeSpan {
+                node_id: node.node_id.clone(),
+                start: node_start as u64,
+                end: output.len() as u64,
+            });
         }
-        Ok(output)
+        Ok(RenderedConversation {
+            text: output,
+            node_spans,
+            part_spans,
+        })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedConversation {
+    text: String,
+    node_spans: Vec<RenderedNodeSpan>,
+    part_spans: Vec<RenderedPartSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedNodeSpan {
+    node_id: String,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedPartSpan {
+    node_id: String,
+    part_id: String,
+    start: u64,
+    end: u64,
 }
 
 fn is_ancestor(candidate: &str, node_id: &str, nodes: &BTreeMap<&str, &MessageNode>) -> bool {
