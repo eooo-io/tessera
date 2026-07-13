@@ -218,6 +218,46 @@ pub enum InboxCommand {
 
 #[derive(Subcommand)]
 pub enum ConversationCommand {
+    /// Encrypt and import a Claude Code JSONL session export
+    ImportClaudeCode {
+        /// Claude Code session JSONL file
+        path: PathBuf,
+        /// Target space id (defaults to the sole space if only one exists)
+        #[arg(long)]
+        space: Option<String>,
+        /// Stop cleanly after this many pending sessions
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume an interrupted Claude Code ingestion run from its encrypted source
+    ResumeClaudeCode {
+        /// Existing interrupted ingestion run id
+        run_id: String,
+        /// Stop cleanly after this many additional pending sessions
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Filter whitelisted conversation source metadata
+    Metadata {
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        git_branch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// List source-neutral ingestion runs, newest first
     Runs {
         /// Emit complete content-free run reports as JSON
@@ -961,6 +1001,68 @@ fn print_conversation_run(run: &tessera_core::conversation::IngestionRunReport, 
     }
 }
 
+fn print_conversation_metadata(item: &tessera_core::conversation::ConversationMetadata) {
+    println!(
+        "{} source={} session={} project={} repository={} branch={} created={} updated={}",
+        item.persisted_conversation_id,
+        item.source_product.as_str(),
+        terminal_safe(&item.session_id),
+        item.project
+            .as_deref()
+            .map(terminal_safe)
+            .unwrap_or_else(|| "-".into()),
+        item.repository
+            .as_deref()
+            .map(terminal_safe)
+            .unwrap_or_else(|| "-".into()),
+        item.git_branch
+            .as_deref()
+            .map(terminal_safe)
+            .unwrap_or_else(|| "-".into()),
+        item.source_created_at.as_deref().unwrap_or("-"),
+        item.source_updated_at.as_deref().unwrap_or("-"),
+    );
+}
+
+fn parse_source_product(
+    value: Option<String>,
+) -> anyhow::Result<Option<tessera_core::conversation::SourceProduct>> {
+    value
+        .map(|value| match value.as_str() {
+            "claude_code" => Ok(tessera_core::conversation::SourceProduct::ClaudeCode),
+            "claude" => Ok(tessera_core::conversation::SourceProduct::Claude),
+            "chatgpt" => Ok(tessera_core::conversation::SourceProduct::Chatgpt),
+            _ => bail!(
+                "unknown conversation source {value}; expected claude_code, claude, or chatgpt"
+            ),
+        })
+        .transpose()
+}
+
+fn stage_claude_code_source(
+    vault: &Vault,
+    space: &SpaceId,
+    path: &std::path::Path,
+) -> anyhow::Result<(String, String)> {
+    let source = std::fs::read(path)
+        .with_context(|| format!("reading Claude Code source {}", path.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("claude-code-session.jsonl")
+        .to_owned();
+    let (_, version) = tessera_core::artifact::register_encrypted_bytes(
+        vault,
+        space,
+        &filename,
+        "application/x-ndjson",
+        tessera_core::artifact::Sensitivity::Restricted,
+        &source,
+    )?;
+    Ok((version.id, filename))
+}
+
 pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
     match command {
         Command::Init => {
@@ -1052,6 +1154,88 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
         Command::Conversation { action } => {
             let vault = open_vault(&vault_path)?;
             match action {
+                ConversationCommand::ImportClaudeCode {
+                    path,
+                    space,
+                    max_items,
+                    json,
+                } => {
+                    let space = resolve_space(&vault, space)?;
+                    let (source_version, source_identity) =
+                        stage_claude_code_source(&vault, &space, &path)?;
+                    let report = tessera_core::conversation::ingest(
+                        &vault,
+                        &space,
+                        &source_version,
+                        &tessera_core::conversation::ClaudeCodeParser::new(Some(source_identity)),
+                        &tessera_core::conversation::IngestionOptions {
+                            max_items,
+                            resume_run_id: None,
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_conversation_run(&report, true);
+                    }
+                    Ok(())
+                }
+                ConversationCommand::ResumeClaudeCode {
+                    run_id,
+                    max_items,
+                    json,
+                } => {
+                    let prior = tessera_core::conversation::get_ingestion_run(&vault, &run_id)?;
+                    if prior.source_product != tessera_core::conversation::SourceProduct::ClaudeCode
+                    {
+                        bail!("ingestion run {run_id} is not a Claude Code source");
+                    }
+                    let report = tessera_core::conversation::ingest(
+                        &vault,
+                        &SpaceId(prior.target_space_id),
+                        &prior.source_artifact_version_id,
+                        &tessera_core::conversation::ClaudeCodeParser::new(prior.source_export_id),
+                        &tessera_core::conversation::IngestionOptions {
+                            max_items,
+                            resume_run_id: Some(run_id),
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_conversation_run(&report, true);
+                    }
+                    Ok(())
+                }
+                ConversationCommand::Metadata {
+                    source,
+                    session,
+                    project,
+                    repository,
+                    git_branch,
+                    json,
+                } => {
+                    let metadata = tessera_core::conversation::list_conversation_metadata(
+                        &vault,
+                        &tessera_core::conversation::ConversationMetadataFilter {
+                            source_product: parse_source_product(source)?,
+                            session_id: session,
+                            project,
+                            repository,
+                            git_branch,
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&metadata)?);
+                    } else if metadata.is_empty() {
+                        println!("No matching conversation metadata.");
+                    } else {
+                        for item in &metadata {
+                            print_conversation_metadata(item);
+                        }
+                    }
+                    Ok(())
+                }
                 ConversationCommand::Runs { json } => {
                     let runs = tessera_core::conversation::list_ingestion_runs(&vault)?;
                     if json {

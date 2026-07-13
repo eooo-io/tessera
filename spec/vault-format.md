@@ -186,6 +186,12 @@ source content. The full state machine, idempotency decisions, CLI reporting,
 and non-destructive rollback procedure are specified in
 `docs/conversation-ingestion-runs-v1.md`.
 
+Migration 0020 adds `conversation_source_metadata`, a deliberately whitelisted
+filter index for source product, session, project/repository, working directory,
+git branch/commit, source-file identity, models, and source timestamps. Message
+text, tool inputs/results, patches, command output, errors, and attachment
+content MUST remain in encrypted blobs and MUST NOT enter this table.
+
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated

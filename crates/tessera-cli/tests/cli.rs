@@ -234,6 +234,103 @@ fn conversation_run_cli_reports_actionable_per_item_results() {
 }
 
 #[test]
+fn claude_code_cli_import_resume_filter_and_reimport_are_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("V.tessera");
+    tessera(&vault_path).args(["init"]).assert().success();
+    let space_output = tessera(&vault_path)
+        .args(["space", "create", "Claude Code"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let space_id = String::from_utf8(space_output)
+        .expect("utf8")
+        .split_whitespace()
+        .find(|word| word.starts_with("space_"))
+        .expect("space id")
+        .to_owned();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/claude-code-session.jsonl");
+
+    let interrupted = tessera(&vault_path)
+        .args(["conversation", "import-claude-code"])
+        .arg(&fixture)
+        .args(["--space", &space_id, "--max-items", "0", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let interrupted: serde_json::Value =
+        serde_json::from_slice(&interrupted).expect("interrupted report");
+    assert_eq!(interrupted["status"], "interrupted");
+    assert_eq!(interrupted["source_export_id"], "claude-code-session.jsonl");
+    let run_id = interrupted["id"].as_str().expect("run id");
+
+    let resumed = tessera(&vault_path)
+        .args(["conversation", "resume-claude-code", run_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed: serde_json::Value = serde_json::from_slice(&resumed).expect("resumed report");
+    assert_eq!(resumed["status"], "completed");
+    assert_eq!(resumed["imported"], 1);
+
+    let metadata = tessera(&vault_path)
+        .args([
+            "conversation",
+            "metadata",
+            "--source",
+            "claude_code",
+            "--project",
+            "tessera-fixture",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("session-sanitized-1")
+                .and(predicate::str::contains("feature/import"))
+                .and(predicate::str::contains("cargo test").not()),
+        )
+        .get_output()
+        .stdout
+        .clone();
+    let metadata: Vec<serde_json::Value> =
+        serde_json::from_slice(&metadata).expect("metadata report");
+    assert_eq!(metadata.len(), 1);
+
+    let duplicate = tessera(&vault_path)
+        .args(["conversation", "import-claude-code"])
+        .arg(&fixture)
+        .args(["--space", &space_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let duplicate: serde_json::Value =
+        serde_json::from_slice(&duplicate).expect("duplicate report");
+    assert_eq!(duplicate["imported"], 0);
+    assert_eq!(duplicate["unchanged"], 1);
+
+    let metadata_after = tessera(&vault_path)
+        .args(["conversation", "metadata", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let metadata_after: Vec<serde_json::Value> =
+        serde_json::from_slice(&metadata_after).expect("metadata after reimport");
+    assert_eq!(metadata_after.len(), 1);
+}
+
+#[test]
 fn inbox_add_status_process_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("V.tessera");

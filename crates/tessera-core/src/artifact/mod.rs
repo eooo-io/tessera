@@ -172,6 +172,26 @@ pub fn record_version(
     })
 }
 
+/// Encrypt bytes into the content-addressed blob store, then register a new
+/// pending artifact and its first immutable version. Callers never receive a
+/// plaintext staging path.
+pub fn register_encrypted_bytes(
+    vault: &Vault,
+    space: &SpaceId,
+    filename: &str,
+    media_type: &str,
+    sensitivity: Sensitivity,
+    bytes: &[u8],
+) -> Result<(ArtifactId, ArtifactVersion), ArtifactError> {
+    let hash = vault
+        .blobs()
+        .put(vault.dek()?, bytes)
+        .map_err(VaultError::Blob)?;
+    let artifact = register(vault, space, filename, media_type, sensitivity)?;
+    let version = record_version(vault, &artifact, &hash, bytes.len() as u64)?;
+    Ok((artifact, version))
+}
+
 /// Change an artifact's quarantine state. The audit row is written in the
 /// same transaction as the change.
 pub fn set_state(

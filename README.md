@@ -124,6 +124,18 @@ target size. Owner CLI results and Guardian citations include the covered media
 time range; source text remains untrusted evidence under the same lens,
 quarantine, disclosure, and receipt path as documents.
 
+## Claude Code session ingestion
+
+`tessera conversation import-claude-code <session.jsonl> --space <id>` imports
+an explicit Claude Code session export through the branch- and tool-aware
+conversation pipeline. The raw JSONL and every derived conversation remain
+encrypted, restricted, and pending; imports never replay tools or silently
+promote content. Interrupted runs resume with `conversation
+resume-claude-code`, while `conversation metadata` filters the whitelisted
+session/project/git metadata index. The exact preservation and private-test
+boundary are documented in
+[`docs/claude-code-importer-v1.md`](docs/claude-code-importer-v1.md).
+
 ## Web clipping
 
 `tessera inbox add-url <url>` performs one explicit, bounded article fetch and

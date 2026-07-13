@@ -99,6 +99,7 @@ mod tests {
             "conversation_ingestion_items",
             "conversation_ingestion_heads",
             "conversation_ingestion_replacements",
+            "conversation_source_metadata",
         ] {
             let count: i64 = conn
                 .query_row(
