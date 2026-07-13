@@ -124,15 +124,55 @@ the normal encrypted-blob pipeline. URLs, titles, dates, fetch times, and
 staging filenames are plaintext metadata subject to the same v1 limitation and
 #50 hardening boundary.
 
+Migration 0018 adds the conversation provenance graph:
+
+- `conversation_archives` binds the exact encrypted source artifact version,
+  encrypted full normal-form blob, BLAKE3 source identity, source product,
+  parser/normalizer versions, locality, and processing time;
+- `conversations` binds one source conversation to one ordinary artifact
+  version. The artifact starts `pending`, and its existing artifact-level
+  sensitivity is the v1 conversation sensitivity boundary;
+- `conversation_source_records`, `conversation_nodes`,
+  `conversation_node_source_records`, and `conversation_content_parts`
+  preserve stable source ids, parent edges, selected-path order, source state,
+  exact raw-record coordinates, tool pairing, and attachment
+  identity/preservation state;
+- `conversation_derivations` and `conversation_spans` bind an encrypted
+  normalized transcript to renderer/chunker versions, derivation hash,
+  locality, processing time, and exact node/content-part byte ranges; and
+- `conversation_chunk_map` binds every derived chunk to its first/last source
+  node and selected-branch endpoint. The chunk's own byte range plus overlapping
+  spans reconstruct the included node, part, source-record, and timestamp
+  coordinates.
+
+Internal archive/conversation/node/part/record/derivation ids are deterministic
+BLAKE3 mappings over length-delimited source identities. Re-rendering or
+re-chunking creates new derivation and chunk ids but MUST NOT replace source
+identities. Conversation chunking reuses `transcript_turns` with one contiguous
+range per selected node, so it does not split a message merely to meet a token
+target or cross into an alternate branch. Integrity diagnostics count the full
+normal-form blob as a referenced derivation; the explicit owner derived-rebuild
+path recreates conversation renderings and chunk mappings from the authenticated
+canonical conversation artifact rather than treating them as generic text.
+
+Content-bearing title/project/model/text/code/tool data, attachment filenames,
+the full canonical conversation, and normalized transcript remain encrypted in
+`blobs/`. Stable source ids, source states, attachment preservation/hash,
+timestamps, byte/line coordinates, component versions, and processing metadata
+are plaintext `vault.db` metadata under the unresolved #50 privacy-hardening
+boundary. Agent-facing code may expose content-free citation coordinates only
+after the ordinary artifact lens permits the conversation; reconstructing whole
+source messages is a separate unlocked-owner operation.
+
 The source-neutral conversation object used before persistence is versioned as
 `tessera.conversation.v1` in `spec/conversation-normal-form.schema.json` and
 documented in `docs/conversation-normal-form-v1.md`. It preserves source-record
 coordinates, explicit parent-linked branches, one selected path, ordered typed
 content parts, attachments, deleted/hidden/unsupported states, and parser plus
-normalizer versions. It is not yet an on-disk table contract; append-only
-conversation persistence lands in a later migration under #47. Production
-implementations must encrypt originals and content-bearing derivations rather
-than serializing this plaintext object into `vault.db`.
+normalizer versions. Migration 0018 is its on-disk contract. Originals,
+canonical per-conversation envelopes, the full archive normal form, and
+content-bearing derivations are encrypted blobs rather than plaintext database
+values.
 
 ## 4. `keyslot.bin`
 

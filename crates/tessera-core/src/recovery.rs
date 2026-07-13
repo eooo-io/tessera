@@ -74,6 +74,8 @@ pub enum RecoveryError {
     Artifact(#[from] crate::artifact::ArtifactError),
     #[error("review-state error: {0}")]
     Review(#[from] crate::review::ReviewError),
+    #[error("conversation rebuild error: {0}")]
+    Conversation(#[from] crate::conversation::ConversationPersistenceError),
     #[error("backup destination already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("backup destination must be outside the source vault: {0}")]
@@ -120,8 +122,11 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
     }
 
     let derived_hashes: Vec<String> = {
-        let mut stmt = conn
-            .prepare("SELECT blob_hash FROM derived_text UNION SELECT blob_hash FROM summaries")?;
+        let mut stmt = conn.prepare(
+            "SELECT blob_hash FROM derived_text
+             UNION SELECT blob_hash FROM summaries
+             UNION SELECT normal_form_blob_hash FROM conversation_archives",
+        )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
@@ -526,6 +531,57 @@ pub fn rebuild_derived(vault: &Vault) -> Result<DerivedRebuildReport, RecoveryEr
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
+    let conversation_rebuilds: Vec<(
+        String,
+        crate::ArtifactId,
+        crate::conversation::ConversationPersistenceConfig,
+    )> = {
+        let mut statement = vault.conn().prepare(
+            "SELECT c.id, av.artifact_id,
+                    cd.renderer_name, cd.renderer_version,
+                    cd.chunker_name, cd.chunker_version,
+                    cd.target_tokens, cd.overlap_tokens, cd.locality
+             FROM conversations c
+             JOIN artifact_versions av ON av.id = c.artifact_version_id
+             LEFT JOIN conversation_derivations cd ON cd.conversation_id = c.id
+             ORDER BY c.id, cd.processed_at",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let renderer_name: Option<String> = row.get(2)?;
+            let config = if let Some(renderer_name) = renderer_name {
+                crate::conversation::ConversationPersistenceConfig {
+                    renderer: crate::conversation::ComponentVersion {
+                        name: renderer_name,
+                        version: row.get::<_, String>(3)?,
+                    },
+                    chunker: crate::conversation::ComponentVersion {
+                        name: row.get::<_, String>(4)?,
+                        version: row.get::<_, String>(5)?,
+                    },
+                    chunk_params: crate::chunk::ChunkParams {
+                        target_tokens: row.get::<_, i64>(6)? as usize,
+                        overlap_tokens: row.get::<_, i64>(7)? as usize,
+                    },
+                    locality: match row.get::<_, String>(8)?.as_str() {
+                        "cloud" => crate::conversation::ProcessingLocality::Cloud,
+                        _ => crate::conversation::ProcessingLocality::Local,
+                    },
+                }
+            } else {
+                crate::conversation::ConversationPersistenceConfig::default()
+            };
+            Ok((
+                row.get::<_, String>(0)?,
+                crate::ArtifactId(row.get::<_, String>(1)?),
+                config,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let conversation_artifacts: HashSet<crate::ArtifactId> = conversation_rebuilds
+        .iter()
+        .map(|(_, artifact, _)| artifact.clone())
+        .collect();
     let mut moved = 0;
     for (artifact, state) in &artifacts {
         if state == "live" {
@@ -564,6 +620,9 @@ pub fn rebuild_derived(vault: &Vault) -> Result<DerivedRebuildReport, RecoveryEr
         failed: 0,
     };
     for (artifact, _) in artifacts {
+        if conversation_artifacts.contains(&artifact) {
+            continue;
+        }
         match crate::extract::extract_text(vault, &artifact) {
             Ok(Some(derived)) => {
                 report.extracted += 1;
@@ -610,6 +669,25 @@ pub fn rebuild_derived(vault: &Vault) -> Result<DerivedRebuildReport, RecoveryEr
                     vault,
                     &artifact,
                     "extract",
+                    &error.to_string(),
+                )?;
+                report.failed += 1;
+            }
+        }
+    }
+    for (conversation_id, artifact, config) in conversation_rebuilds {
+        match crate::conversation::rechunk_conversation(vault, &conversation_id, &config) {
+            Ok(_) => {
+                report.extracted += 1;
+                report.chunked += 1;
+                crate::review::resolve_processing_error(vault, &artifact, "conversation_render")?;
+                crate::review::resolve_processing_error(vault, &artifact, "chunk")?;
+            }
+            Err(error) => {
+                crate::review::record_processing_error(
+                    vault,
+                    &artifact,
+                    "conversation_render",
                     &error.to_string(),
                 )?;
                 report.failed += 1;

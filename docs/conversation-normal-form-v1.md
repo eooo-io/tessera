@@ -68,7 +68,16 @@ adjacent events on one selected path, but it must never split a part merely to
 hit a target size and must never cross into an alternate branch. Every derived
 chunk records its first/last node ids, included part ids, normalized byte range,
 source record ids, branch endpoint, renderer/chunker versions, and derivation
-hash. That persistence contract is implemented under #47.
+hash. Migration 0018 and `tessera_core::conversation::persist_archive`
+implement that persistence contract. `citation_for_chunk` and
+`citation_for_disclosed_range` return content-free exact coordinates;
+`reconstruct_cited_nodes` is the separate unlocked-owner reconstruction path.
+
+Each persisted conversation is an ordinary pending Tessera artifact with the
+conversation's sensitivity. Existing quarantine and lens checks therefore
+remain the only disclosure boundary; conversation retrieval has no bypass.
+Re-chunking creates a new derivation and chunk identities while stable source
+conversation, node, content-part, and raw-record identities remain unchanged.
 
 ## Sensitivity boundary
 
