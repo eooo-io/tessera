@@ -10,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod claude_code;
 mod ingestion;
 mod persistence;
+
+pub use claude_code::ClaudeCodeParser;
 
 pub use ingestion::{
     get_ingestion_run, ingest, list_ingestion_runs, CandidateOutcome, ConversationCandidate,
@@ -20,10 +23,12 @@ pub use ingestion::{
 };
 
 pub use persistence::{
-    citation_for_chunk, citation_for_disclosed_range, load_conversation, persist_archive,
-    persist_archive_selection, rechunk_conversation, reconstruct_cited_nodes, ConversationCitation,
-    ConversationPersistenceConfig, ConversationPersistenceError, PersistedConversation,
-    ProcessingLocality,
+    citation_for_chunk, citation_for_disclosed_range, list_conversation_metadata,
+    load_conversation, persist_archive, persist_archive_selection, rechunk_conversation,
+    reconstruct_cited_nodes, reconstruct_cited_source_records, ConversationCitation,
+    ConversationMetadata, ConversationMetadataFilter, ConversationPersistenceConfig,
+    ConversationPersistenceError, PersistedConversation, ProcessingLocality,
+    ReconstructedSourceRecord,
 };
 
 pub const SCHEMA_VERSION: &str = "tessera.conversation.v1";

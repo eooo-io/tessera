@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use super::{
@@ -146,6 +147,45 @@ pub struct ConversationCitation {
     pub chunker: ComponentVersion,
     pub locality: ProcessingLocality,
     pub processed_at: String,
+}
+
+/// Exact owner-only bytes for one source record named by a citation. These
+/// bytes are never part of content-free citation metadata or Guardian output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconstructedSourceRecord {
+    pub record_id: String,
+    pub source_id: Option<String>,
+    pub record_index: u64,
+    pub byte_range: (u64, u64),
+    pub line_range: Option<(u64, u64)>,
+    pub bytes: Vec<u8>,
+}
+
+/// Whitelisted source metadata. Content-bearing source fields never enter this
+/// structure or its plaintext filter index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationMetadata {
+    pub persisted_conversation_id: String,
+    pub source_product: SourceProduct,
+    pub session_id: String,
+    pub project: Option<String>,
+    pub repository: Option<String>,
+    pub working_directory: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit: Option<String>,
+    pub source_file_identity: Option<String>,
+    pub models: Vec<String>,
+    pub source_created_at: Option<String>,
+    pub source_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConversationMetadataFilter {
+    pub source_product: Option<SourceProduct>,
+    pub session_id: Option<String>,
+    pub project: Option<String>,
+    pub repository: Option<String>,
+    pub git_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +457,7 @@ fn persist_archive_inner(
                 ],
             )?;
             persist_source_graph(vault, &item.id, conversation)?;
+            persist_source_metadata(vault, &item.id, conversation, &archive.source)?;
             let derivation = create_derivation(vault, item, config, &now)?;
             persisted.push(derivation);
         }
@@ -692,6 +733,193 @@ pub fn reconstruct_cited_nodes(
             })
         })
         .collect()
+}
+
+/// Reconstruct the exact source records named by a citation from the
+/// authenticated encrypted original. This is an unlocked-owner operation and
+/// deliberately separate from the disclosure path.
+pub fn reconstruct_cited_source_records(
+    vault: &Vault,
+    citation: &ConversationCitation,
+) -> Result<Vec<ReconstructedSourceRecord>, ConversationPersistenceError> {
+    let (source_version_id, source_hash): (String, String) = vault
+        .conn()
+        .query_row(
+            "SELECT ca.source_artifact_version_id, ca.source_hash
+             FROM conversations c
+             JOIN conversation_archives ca ON ca.id = c.archive_id
+             WHERE c.id = ?1",
+            [&citation.persisted_conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                ConversationPersistenceError::ConversationNotFound(
+                    citation.persisted_conversation_id.clone(),
+                )
+            }
+            other => ConversationPersistenceError::Database(other),
+        })?;
+    if source_version_id != citation.source_artifact_version_id
+        || source_hash != citation.source_hash
+    {
+        return Err(ConversationPersistenceError::Invariant(
+            "citation source identity does not match the persisted conversation".into(),
+        ));
+    }
+    let blob_hash: String = vault.conn().query_row(
+        "SELECT blob_hash FROM artifact_versions WHERE id = ?1",
+        [&source_version_id],
+        |row| row.get(0),
+    )?;
+    if blob_hash != source_hash {
+        return Err(ConversationPersistenceError::Invariant(
+            "persisted source hash does not match its artifact version".into(),
+        ));
+    }
+    let source = vault.blobs().get(vault.dek()?, &BlobHash(blob_hash))?;
+    let conversation = load_conversation(vault, &citation.persisted_conversation_id)?;
+    let by_id: BTreeMap<&str, &super::SourceRecord> = conversation
+        .source_records
+        .iter()
+        .map(|record| (record.record_id.as_str(), record))
+        .collect();
+    citation
+        .source_record_ids
+        .iter()
+        .map(|id| {
+            let record = by_id.get(id.as_str()).ok_or_else(|| {
+                ConversationPersistenceError::Invariant(format!(
+                    "citation references missing source record {id}"
+                ))
+            })?;
+            let (start, end) = record.byte_start.zip(record.byte_end).ok_or_else(|| {
+                ConversationPersistenceError::Invariant(format!(
+                    "source record {id} has no exact byte range"
+                ))
+            })?;
+            let bytes = source
+                .get(start as usize..end as usize)
+                .ok_or_else(|| {
+                    ConversationPersistenceError::Invariant(format!(
+                        "source record {id} range is outside the authenticated source"
+                    ))
+                })?
+                .to_vec();
+            Ok(ReconstructedSourceRecord {
+                record_id: record.record_id.clone(),
+                source_id: record.source_id.clone(),
+                record_index: record.record_index,
+                byte_range: (start, end),
+                line_range: record.line_start.zip(record.line_end),
+                bytes,
+            })
+        })
+        .collect()
+}
+
+pub fn list_conversation_metadata(
+    vault: &Vault,
+    filter: &ConversationMetadataFilter,
+) -> Result<Vec<ConversationMetadata>, ConversationPersistenceError> {
+    let product = filter.source_product.map(source_product_str);
+    let mut statement = vault.conn().prepare(
+        "SELECT conversation_id, source_product, session_id, project, repository,
+                working_directory, git_branch, git_commit, source_file_identity,
+                models_json, source_created_at, source_updated_at
+         FROM conversation_source_metadata
+         WHERE (?1 IS NULL OR source_product = ?1)
+           AND (?2 IS NULL OR session_id = ?2)
+           AND (?3 IS NULL OR project = ?3)
+           AND (?4 IS NULL OR repository = ?4)
+           AND (?5 IS NULL OR git_branch = ?5)
+         ORDER BY source_updated_at DESC, conversation_id",
+    )?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![
+                product,
+                filter.session_id,
+                filter.project,
+                filter.repository,
+                filter.git_branch,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ConversationMetadata {
+                persisted_conversation_id: row.0,
+                source_product: parse_source_product(&row.1)?,
+                session_id: row.2,
+                project: row.3,
+                repository: row.4,
+                working_directory: row.5,
+                git_branch: row.6,
+                git_commit: row.7,
+                source_file_identity: row.8,
+                models: serde_json::from_str(&row.9)?,
+                source_created_at: row.10,
+                source_updated_at: row.11,
+            })
+        })
+        .collect()
+}
+
+fn persist_source_metadata(
+    vault: &Vault,
+    conversation_id: &str,
+    conversation: &Conversation,
+    source: &SourceIdentity,
+) -> Result<(), ConversationPersistenceError> {
+    let value = |key: &str| conversation.extensions.get(key).and_then(Value::as_str);
+    let models: Vec<&str> = conversation
+        .extensions
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let session_id = value("session_id").unwrap_or(&conversation.conversation_id);
+    vault.conn().execute(
+        "INSERT INTO conversation_source_metadata
+         (conversation_id, source_product, session_id, project, repository,
+          working_directory, git_branch, git_commit, source_file_identity,
+          models_json, source_created_at, source_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            conversation_id,
+            source_product_str(source.product),
+            session_id,
+            value("project").or(conversation.project.as_deref()),
+            value("repository"),
+            value("cwd"),
+            value("git_branch"),
+            value("git_commit"),
+            value("source_file_identity").or(source.export_id.as_deref()),
+            serde_json::to_string(&models)?,
+            conversation.created_at,
+            conversation.updated_at,
+        ],
+    )?;
+    Ok(())
 }
 
 fn persist_source_graph(
@@ -1264,6 +1492,17 @@ fn source_product_str(product: SourceProduct) -> &'static str {
         SourceProduct::ClaudeCode => "claude_code",
         SourceProduct::Claude => "claude",
         SourceProduct::Chatgpt => "chatgpt",
+    }
+}
+
+fn parse_source_product(value: &str) -> Result<SourceProduct, ConversationPersistenceError> {
+    match value {
+        "claude_code" => Ok(SourceProduct::ClaudeCode),
+        "claude" => Ok(SourceProduct::Claude),
+        "chatgpt" => Ok(SourceProduct::Chatgpt),
+        _ => Err(ConversationPersistenceError::Invariant(
+            "conversation metadata has an unknown source product".into(),
+        )),
     }
 }
 

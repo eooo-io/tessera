@@ -196,6 +196,7 @@ pub struct IngestionRunReport {
     pub target_space_id: String,
     pub source_product: SourceProduct,
     pub source_hash: String,
+    pub source_export_id: Option<String>,
     pub parser: ComponentVersion,
     pub normalizer: ComponentVersion,
     pub status: IngestionRunStatus,
@@ -270,6 +271,7 @@ struct ResumeIdentity<'a> {
     target_space_id: &'a SpaceId,
     product: SourceProduct,
     source_hash: &'a str,
+    source_export_id: Option<String>,
     parser: &'a ComponentVersion,
     normalizer: &'a ComponentVersion,
 }
@@ -320,6 +322,7 @@ pub fn ingest(
                 target_space_id: space_id,
                 product: source_product,
                 source_hash: &source_hash,
+                source_export_id: parser.export_id(),
                 parser: &parser_version,
                 normalizer: &normalizer_version,
             },
@@ -331,15 +334,17 @@ pub fn ingest(
         vault.conn().execute(
             "INSERT INTO conversation_ingestion_runs
              (id, source_artifact_version_id, target_space_id, source_product, source_hash,
+              source_export_id,
               parser_name, parser_version, normalizer_name, normalizer_version,
               status, started_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running', ?11, ?11)",
             rusqlite::params![
                 id,
                 source_artifact_version_id,
                 space_id.0,
                 source_product_str(source_product),
                 source_hash,
+                parser.export_id(),
                 parser_version.name,
                 parser_version.version,
                 normalizer_version.name,
@@ -512,6 +517,7 @@ pub fn get_ingestion_run(
         .conn()
         .query_row(
             "SELECT source_artifact_version_id, target_space_id, source_product, source_hash,
+                    source_export_id,
                     parser_name, parser_version, normalizer_name, normalizer_version,
                     status, discovered_count, imported_count, unchanged_count,
                     updated_count, quarantined_count, failed_count, checkpoint_ordinal,
@@ -525,12 +531,12 @@ pub fn get_ingestion_run(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, String>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, i64>(11)?,
                     row.get::<_, i64>(12)?,
@@ -538,11 +544,12 @@ pub fn get_ingestion_run(
                     row.get::<_, i64>(14)?,
                     row.get::<_, i64>(15)?,
                     row.get::<_, i64>(16)?,
-                    row.get::<_, Option<String>>(17)?,
+                    row.get::<_, i64>(17)?,
                     row.get::<_, Option<String>>(18)?,
-                    row.get::<_, String>(19)?,
+                    row.get::<_, Option<String>>(19)?,
                     row.get::<_, String>(20)?,
-                    row.get::<_, Option<String>>(21)?,
+                    row.get::<_, String>(21)?,
+                    row.get::<_, Option<String>>(22)?,
                 ))
             },
         )
@@ -556,28 +563,29 @@ pub fn get_ingestion_run(
         target_space_id: run.1,
         source_product: parse_source_product(&run.2)?,
         source_hash: run.3,
+        source_export_id: run.4,
         parser: ComponentVersion {
-            name: run.4,
-            version: run.5,
+            name: run.5,
+            version: run.6,
         },
         normalizer: ComponentVersion {
-            name: run.6,
-            version: run.7,
+            name: run.7,
+            version: run.8,
         },
-        status: IngestionRunStatus::parse(&run.8),
-        discovered: run.9 as u64,
-        imported: run.10 as u64,
-        unchanged: run.11 as u64,
-        updated: run.12 as u64,
-        quarantined: run.13 as u64,
-        failed: run.14 as u64,
-        checkpoint_ordinal: run.15 as u64,
-        retry_count: run.16 as u64,
-        error_code: run.17,
-        safe_error_summary: run.18,
-        started_at: run.19,
-        updated_at: run.20,
-        completed_at: run.21,
+        status: IngestionRunStatus::parse(&run.9),
+        discovered: run.10 as u64,
+        imported: run.11 as u64,
+        unchanged: run.12 as u64,
+        updated: run.13 as u64,
+        quarantined: run.14 as u64,
+        failed: run.15 as u64,
+        checkpoint_ordinal: run.16 as u64,
+        retry_count: run.17 as u64,
+        error_code: run.18,
+        safe_error_summary: run.19,
+        started_at: run.20,
+        updated_at: run.21,
+        completed_at: run.22,
         items: load_items(vault, run_id)?,
     })
 }
@@ -718,6 +726,7 @@ fn validate_resume(
         .conn()
         .query_row(
             "SELECT source_artifact_version_id, target_space_id, source_product, source_hash,
+                    source_export_id,
                     parser_name, parser_version, normalizer_name, normalizer_version, status
              FROM conversation_ingestion_runs WHERE id = ?1",
             [run_id],
@@ -727,17 +736,18 @@ fn validate_resume(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             },
         )
         .optional()?
         .ok_or_else(|| IngestionError::RunNotFound(run_id.into()))?;
-    match row.8.as_str() {
+    match row.9.as_str() {
         "completed" => return Err(IngestionError::AlreadyComplete(run_id.into())),
         "failed" => return Err(IngestionError::FailedRunNotResumable(run_id.into())),
         _ => {}
@@ -746,10 +756,11 @@ fn validate_resume(
         || row.1 != identity.target_space_id.0
         || row.2 != source_product_str(identity.product)
         || row.3 != identity.source_hash
-        || row.4 != identity.parser.name
-        || row.5 != identity.parser.version
-        || row.6 != identity.normalizer.name
-        || row.7 != identity.normalizer.version
+        || row.4 != identity.source_export_id
+        || row.5 != identity.parser.name
+        || row.6 != identity.parser.version
+        || row.7 != identity.normalizer.name
+        || row.8 != identity.normalizer.version
     {
         return Err(IngestionError::ResumeDrift(run_id.into()));
     }
