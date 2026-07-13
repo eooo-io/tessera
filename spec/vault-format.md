@@ -124,6 +124,16 @@ the normal encrypted-blob pipeline. URLs, titles, dates, fetch times, and
 staging filenames are plaintext metadata subject to the same v1 limitation and
 #50 hardening boundary.
 
+The source-neutral conversation object used before persistence is versioned as
+`tessera.conversation.v1` in `spec/conversation-normal-form.schema.json` and
+documented in `docs/conversation-normal-form-v1.md`. It preserves source-record
+coordinates, explicit parent-linked branches, one selected path, ordered typed
+content parts, attachments, deleted/hidden/unsupported states, and parser plus
+normalizer versions. It is not yet an on-disk table contract; append-only
+conversation persistence lands in a later migration under #47. Production
+implementations must encrypt originals and content-bearing derivations rather
+than serializing this plaintext object into `vault.db`.
+
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated

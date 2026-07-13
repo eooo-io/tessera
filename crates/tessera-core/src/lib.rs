@@ -3,6 +3,7 @@
 pub mod artifact;
 pub mod blob;
 pub mod chunk;
+pub mod conversation;
 pub mod crypto;
 pub mod db;
 pub mod disclosure;
