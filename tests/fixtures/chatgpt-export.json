@@ -1,0 +1,103 @@
+[
+  {
+    "id": "chatgpt-fixture-1",
+    "title": "Sanitized branch fixture",
+    "create_time": 1767225600,
+    "update_time": 1767225900,
+    "current_node": "node-selected-final",
+    "project_id": "project-sanitized",
+    "mapping": {
+      "node-root": {
+        "id": "node-root",
+        "message": null,
+        "parent": null,
+        "children": ["node-user"]
+      },
+      "node-user": {
+        "id": "node-user",
+        "message": {
+          "id": "message-user",
+          "author": {"role": "user"},
+          "create_time": 1767225660,
+          "status": "finished_successfully",
+          "content": {"content_type": "text", "parts": ["Choose the archive path."]},
+          "metadata": {}
+        },
+        "parent": "node-root",
+        "children": ["node-selected", "node-alternate"]
+      },
+      "node-selected": {
+        "id": "node-selected",
+        "message": {
+          "id": "message-selected",
+          "author": {"role": "assistant"},
+          "create_time": 1767225720,
+          "status": "finished_successfully",
+          "content": {"content_type": "text", "parts": ["selected archive answer"]},
+          "metadata": {"model_slug": "fixture-model"}
+        },
+        "parent": "node-user",
+        "children": ["node-selected-final"]
+      },
+      "node-selected-final": {
+        "id": "node-selected-final",
+        "message": {
+          "id": "message-selected-final",
+          "author": {"role": "user"},
+          "create_time": 1767225780,
+          "status": "finished_successfully",
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              "Use this image as evidence.",
+              {"content_type": "image_asset_pointer", "asset_pointer": "file-service://fixture-image", "mime_type": "image/png"},
+              {"content_type": "future_block", "fixture": true}
+            ]
+          },
+          "metadata": {
+            "attachments": [{"file_id": "fixture-file", "name": "notes.txt", "mime_type": "text/plain"}]
+          }
+        },
+        "parent": "node-selected",
+        "children": []
+      },
+      "node-alternate": {
+        "id": "node-alternate",
+        "message": {
+          "id": "message-alternate",
+          "author": {"role": "assistant"},
+          "create_time": 1767225730,
+          "status": "finished_successfully",
+          "content": {"content_type": "text", "parts": ["alternate archive answer"]},
+          "metadata": {"model_slug": "fixture-model"}
+        },
+        "parent": "node-user",
+        "children": ["node-deleted"]
+      },
+      "node-deleted": {
+        "id": "node-deleted",
+        "message": {
+          "id": "message-deleted",
+          "author": {"role": "user"},
+          "create_time": 1767225800,
+          "status": "deleted",
+          "content": {"content_type": "text", "parts": []},
+          "metadata": {"is_deleted": true}
+        },
+        "parent": "node-alternate",
+        "children": []
+      },
+      "node-malformed": {
+        "id": "node-malformed",
+        "message": "wrong-type-fixture",
+        "parent": null,
+        "children": []
+      }
+    }
+  },
+  {
+    "id": "chatgpt-fixture-invalid",
+    "title": "Narrow structural failure",
+    "mapping": []
+  }
+]

@@ -10,11 +10,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod archive_source;
+mod chatgpt_export;
 mod claude_code;
+mod claude_export;
 mod ingestion;
 mod persistence;
 
+pub use chatgpt_export::ChatgptExportParser;
 pub use claude_code::ClaudeCodeParser;
+pub use claude_export::ClaudeExportParser;
 
 pub use ingestion::{
     get_ingestion_run, ingest, list_ingestion_runs, CandidateOutcome, ConversationCandidate,

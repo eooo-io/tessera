@@ -331,6 +331,94 @@ fn claude_code_cli_import_resume_filter_and_reimport_are_idempotent() {
 }
 
 #[test]
+fn archive_import_clis_resume_quarantine_narrowly_and_reimport_idempotently() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("V.tessera");
+    tessera(&vault_path).args(["init"]).assert().success();
+    let space_output = tessera(&vault_path)
+        .args(["space", "create", "Conversation Archives"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let space_id = String::from_utf8(space_output)
+        .expect("utf8")
+        .split_whitespace()
+        .find(|word| word.starts_with("space_"))
+        .expect("space id")
+        .to_owned();
+    let fixture_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+
+    for (import, resume, fixture, source, conversation_id) in [
+        (
+            "import-claude",
+            "resume-claude",
+            "claude-export.json",
+            "claude",
+            "claude-fixture-1",
+        ),
+        (
+            "import-chatgpt",
+            "resume-chatgpt",
+            "chatgpt-export.json",
+            "chatgpt",
+            "chatgpt-fixture-1",
+        ),
+    ] {
+        let fixture = fixture_root.join(fixture);
+        let interrupted = tessera(&vault_path)
+            .args(["conversation", import])
+            .arg(&fixture)
+            .args(["--space", &space_id, "--max-items", "0", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let interrupted: serde_json::Value =
+            serde_json::from_slice(&interrupted).expect("interrupted report");
+        assert_eq!(interrupted["status"], "interrupted");
+        assert_eq!(interrupted["discovered"], 2);
+
+        let run_id = interrupted["id"].as_str().expect("run id");
+        let resumed = tessera(&vault_path)
+            .args(["conversation", resume, run_id, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let resumed: serde_json::Value = serde_json::from_slice(&resumed).expect("resumed report");
+        assert_eq!(resumed["status"], "completed");
+        assert_eq!(resumed["imported"], 1);
+        assert_eq!(resumed["quarantined"], 1);
+
+        tessera(&vault_path)
+            .args(["conversation", "metadata", "--source", source, "--json"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(conversation_id));
+
+        let duplicate = tessera(&vault_path)
+            .args(["conversation", import])
+            .arg(&fixture)
+            .args(["--space", &space_id, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let duplicate: serde_json::Value =
+            serde_json::from_slice(&duplicate).expect("duplicate report");
+        assert_eq!(duplicate["imported"], 0);
+        assert_eq!(duplicate["unchanged"], 1);
+        assert_eq!(duplicate["quarantined"], 1);
+    }
+}
+
+#[test]
 fn inbox_add_status_process_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("V.tessera");

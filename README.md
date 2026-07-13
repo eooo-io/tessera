@@ -136,6 +136,21 @@ session/project/git metadata index. The exact preservation and private-test
 boundary are documented in
 [`docs/claude-code-importer-v1.md`](docs/claude-code-importer-v1.md).
 
+## Claude and ChatGPT archive ingestion
+
+`tessera conversation import-claude <conversations.json> --space <id>` and
+`tessera conversation import-chatgpt <conversations.json> --space <id>` import
+account data exports through separate source adapters and the same durable
+conversation runner. Their matching `resume-claude` and `resume-chatgpt`
+commands continue intentional checkpoints from the authenticated encrypted
+source. ChatGPT mapping branches remain separate and only the explicit current
+branch is rendered; Claude content blocks, tool events, and attachments retain
+source order and identifiers. Originals and derived conversations are
+restricted, encrypted, and pending by default. No attachment URL is fetched.
+The supported v1 shapes, safe-drift behavior, and post-freeze private-archive
+test boundary are documented in
+[`docs/conversation-archive-importers-v1.md`](docs/conversation-archive-importers-v1.md).
+
 ## Web clipping
 
 `tessera inbox add-url <url>` performs one explicit, bounded article fetch and
