@@ -10,11 +10,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod ingestion;
 mod persistence;
+
+pub use ingestion::{
+    get_ingestion_run, ingest, list_ingestion_runs, CandidateOutcome, ConversationCandidate,
+    ConversationSourceParser, IngestionError, IngestionIssue, IngestionItemReport,
+    IngestionItemStatus, IngestionOptions, IngestionRunReport, IngestionRunStatus,
+};
 
 pub use persistence::{
     citation_for_chunk, citation_for_disclosed_range, load_conversation, persist_archive,
-    rechunk_conversation, reconstruct_cited_nodes, ConversationCitation,
+    persist_archive_selection, rechunk_conversation, reconstruct_cited_nodes, ConversationCitation,
     ConversationPersistenceConfig, ConversationPersistenceError, PersistedConversation,
     ProcessingLocality,
 };
@@ -57,6 +64,16 @@ pub enum SourceProduct {
     ClaudeCode,
     Claude,
     Chatgpt,
+}
+
+impl SourceProduct {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude_code",
+            Self::Claude => "claude",
+            Self::Chatgpt => "chatgpt",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

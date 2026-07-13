@@ -241,6 +241,11 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
         conn,
         "SELECT COUNT(*) FROM processing_errors WHERE resolved_at IS NULL",
     )?;
+    let unresolved_conversation_ingestion = scalar(
+        conn,
+        "SELECT COUNT(*) FROM conversation_ingestion_runs
+         WHERE status IN ('running', 'interrupted')",
+    )?;
     let incomplete_artifacts = scalar(
         conn,
         "SELECT COUNT(*) FROM artifacts a
@@ -360,13 +365,21 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
         ),
         check(
             "processing_state",
-            if unresolved_processing + incomplete_artifacts + abandoned_staging == 0 {
+            if unresolved_processing
+                + unresolved_conversation_ingestion
+                + incomplete_artifacts
+                + abandoned_staging
+                == 0
+            {
                 IntegrityClass::Ok
             } else {
                 IntegrityClass::Repairable
             },
-            unresolved_processing + incomplete_artifacts + abandoned_staging,
-            "pending items retain actionable per-stage errors for owner review",
+            unresolved_processing
+                + unresolved_conversation_ingestion
+                + incomplete_artifacts
+                + abandoned_staging,
+            "pending items and unfinished conversation runs retain actionable content-free errors for owner review or deterministic resume",
         ),
         check(
             "lenses_sessions",

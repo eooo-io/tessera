@@ -174,6 +174,18 @@ canonical per-conversation envelopes, the full archive normal form, and
 content-bearing derivations are encrypted blobs rather than plaintext database
 values.
 
+Migration 0019 adds `conversation_ingestion_runs`,
+`conversation_ingestion_items`, `conversation_ingestion_heads`, and
+`conversation_ingestion_replacements`. The run/item tables form the durable
+source-neutral checkpoint and content-free outcome ledger. Heads map a source
+product plus source-native conversation id to its current persisted identity;
+replacement rows preserve corrected-source, parser-upgrade, and
+normalizer-upgrade lineage without deleting prior provenance. Run/item errors
+are closed structural codes plus static safe summaries and MUST NOT contain
+source content. The full state machine, idempotency decisions, CLI reporting,
+and non-destructive rollback procedure are specified in
+`docs/conversation-ingestion-runs-v1.md`.
+
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated
