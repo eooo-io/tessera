@@ -243,6 +243,56 @@ pub enum ConversationCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Encrypt and import a Claude account data export
+    ImportClaude {
+        /// Claude conversations JSON export
+        path: PathBuf,
+        /// Target space id (defaults to the sole space if only one exists)
+        #[arg(long)]
+        space: Option<String>,
+        /// Stop cleanly after this many pending conversations
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume an interrupted Claude archive ingestion run
+    ResumeClaude {
+        /// Existing interrupted ingestion run id
+        run_id: String,
+        /// Stop cleanly after this many additional pending conversations
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Encrypt and import a ChatGPT conversations JSON export
+    ImportChatgpt {
+        /// ChatGPT conversations JSON export
+        path: PathBuf,
+        /// Target space id (defaults to the sole space if only one exists)
+        #[arg(long)]
+        space: Option<String>,
+        /// Stop cleanly after this many pending conversations
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume an interrupted ChatGPT archive ingestion run
+    ResumeChatgpt {
+        /// Existing interrupted ingestion run id
+        run_id: String,
+        /// Stop cleanly after this many additional pending conversations
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Emit the content-free run report as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Filter whitelisted conversation source metadata
     Metadata {
         #[arg(long)]
@@ -1063,6 +1113,32 @@ fn stage_claude_code_source(
     Ok((version.id, filename))
 }
 
+fn stage_conversation_archive_source(
+    vault: &Vault,
+    space: &SpaceId,
+    path: &std::path::Path,
+    source_label: &str,
+    default_filename: &str,
+) -> anyhow::Result<(String, String)> {
+    let source = std::fs::read(path)
+        .with_context(|| format!("reading {source_label} source {}", path.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(default_filename)
+        .to_owned();
+    let (_, version) = tessera_core::artifact::register_encrypted_bytes(
+        vault,
+        space,
+        &filename,
+        "application/json",
+        tessera_core::artifact::Sensitivity::Restricted,
+        &source,
+    )?;
+    Ok((version.id, filename))
+}
+
 pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
     match command {
         Command::Init => {
@@ -1195,6 +1271,126 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         &SpaceId(prior.target_space_id),
                         &prior.source_artifact_version_id,
                         &tessera_core::conversation::ClaudeCodeParser::new(prior.source_export_id),
+                        &tessera_core::conversation::IngestionOptions {
+                            max_items,
+                            resume_run_id: Some(run_id),
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_conversation_run(&report, true);
+                    }
+                    Ok(())
+                }
+                ConversationCommand::ImportClaude {
+                    path,
+                    space,
+                    max_items,
+                    json,
+                } => {
+                    let space = resolve_space(&vault, space)?;
+                    let (source_version, source_identity) = stage_conversation_archive_source(
+                        &vault,
+                        &space,
+                        &path,
+                        "Claude export",
+                        "claude-conversations.json",
+                    )?;
+                    let report = tessera_core::conversation::ingest(
+                        &vault,
+                        &space,
+                        &source_version,
+                        &tessera_core::conversation::ClaudeExportParser::new(Some(source_identity)),
+                        &tessera_core::conversation::IngestionOptions {
+                            max_items,
+                            resume_run_id: None,
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_conversation_run(&report, true);
+                    }
+                    Ok(())
+                }
+                ConversationCommand::ResumeClaude {
+                    run_id,
+                    max_items,
+                    json,
+                } => {
+                    let prior = tessera_core::conversation::get_ingestion_run(&vault, &run_id)?;
+                    if prior.source_product != tessera_core::conversation::SourceProduct::Claude {
+                        bail!("ingestion run {run_id} is not a Claude export source");
+                    }
+                    let report = tessera_core::conversation::ingest(
+                        &vault,
+                        &SpaceId(prior.target_space_id),
+                        &prior.source_artifact_version_id,
+                        &tessera_core::conversation::ClaudeExportParser::new(
+                            prior.source_export_id,
+                        ),
+                        &tessera_core::conversation::IngestionOptions {
+                            max_items,
+                            resume_run_id: Some(run_id),
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_conversation_run(&report, true);
+                    }
+                    Ok(())
+                }
+                ConversationCommand::ImportChatgpt {
+                    path,
+                    space,
+                    max_items,
+                    json,
+                } => {
+                    let space = resolve_space(&vault, space)?;
+                    let (source_version, source_identity) = stage_conversation_archive_source(
+                        &vault,
+                        &space,
+                        &path,
+                        "ChatGPT export",
+                        "chatgpt-conversations.json",
+                    )?;
+                    let report = tessera_core::conversation::ingest(
+                        &vault,
+                        &space,
+                        &source_version,
+                        &tessera_core::conversation::ChatgptExportParser::new(Some(
+                            source_identity,
+                        )),
+                        &tessera_core::conversation::IngestionOptions {
+                            max_items,
+                            resume_run_id: None,
+                        },
+                    )?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_conversation_run(&report, true);
+                    }
+                    Ok(())
+                }
+                ConversationCommand::ResumeChatgpt {
+                    run_id,
+                    max_items,
+                    json,
+                } => {
+                    let prior = tessera_core::conversation::get_ingestion_run(&vault, &run_id)?;
+                    if prior.source_product != tessera_core::conversation::SourceProduct::Chatgpt {
+                        bail!("ingestion run {run_id} is not a ChatGPT export source");
+                    }
+                    let report = tessera_core::conversation::ingest(
+                        &vault,
+                        &SpaceId(prior.target_space_id),
+                        &prior.source_artifact_version_id,
+                        &tessera_core::conversation::ChatgptExportParser::new(
+                            prior.source_export_id,
+                        ),
                         &tessera_core::conversation::IngestionOptions {
                             max_items,
                             resume_run_id: Some(run_id),

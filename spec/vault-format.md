@@ -192,6 +192,19 @@ git branch/commit, source-file identity, models, and source timestamps. Message
 text, tool inputs/results, patches, command output, errors, and attachment
 content MUST remain in encrypted blobs and MUST NOT enter this table.
 
+The v1 account-export adapters are source-isolated. The ChatGPT adapter maps
+`mapping` nodes and `current_node` into explicit parent-linked branches; it
+MUST NOT concatenate regenerated siblings. The Claude adapter maps each
+`chat_messages`/`messages` entry and its ordered content blocks independently
+from the Claude Code JSONL adapter. For top-level JSON arrays, source records
+retain the exact enclosing conversation byte/line range plus source-native
+node, message, block, attachment, and tool ids in the encrypted canonical
+envelope. A wrapper-object export retains the authenticated whole-export range
+when a narrower lexical range is unavailable. Syntax failure stops archive
+enumeration; required-structure or field-type drift after enumeration is
+recorded against only that source conversation. Attachment references are
+preserved but external URLs MUST NOT be fetched by either parser.
+
 ## 4. `keyslot.bin`
 
 LUKS-style list of key slots. Each slot wraps the same randomly generated
