@@ -12,12 +12,8 @@ env:
 
 jobs:
   check:
-    name: Check, Lint, Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    name: Check, Lint, Test
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
