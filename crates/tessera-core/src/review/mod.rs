@@ -28,6 +28,8 @@ pub enum ReviewError {
     Chunk(#[from] crate::chunk::ChunkError),
     #[error("summary error: {0}")]
     Summary(#[from] crate::summary::SummaryError),
+    #[error("image understanding error: {0}")]
+    Image(#[from] crate::image::ImageError),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("artifact is not pending: {0}")]
@@ -277,8 +279,48 @@ pub fn inspect(
 
 /// Retry the local text processing stages, preserving pending state.
 pub fn retry_processing(vault: &Vault, artifact: &ArtifactId) -> Result<ReviewItem, ReviewError> {
-    if artifact::get(vault, artifact)?.state != ArtifactState::Pending {
+    retry_processing_with(vault, artifact, None)
+}
+
+/// Retry processing, optionally supplying an image understanding provider.
+///
+/// Images take a different route than documents: they have no text layer, so
+/// OCR and a caption become their searchable surface. The provider is passed
+/// in rather than constructed here because loading a vision model is
+/// expensive and may legitimately be unavailable — an owner without the model
+/// installed should still be able to retry a PDF.
+pub fn retry_processing_with(
+    vault: &Vault,
+    artifact: &ArtifactId,
+    image_provider: Option<&dyn crate::image::ImageUnderstandingProvider>,
+) -> Result<ReviewItem, ReviewError> {
+    let metadata = artifact::get(vault, artifact)?;
+    if metadata.state != ArtifactState::Pending {
         return Err(ReviewError::NotPending(artifact.0.clone()));
+    }
+    if crate::image::decode::is_supported(&metadata.media_type) {
+        let Some(provider) = image_provider else {
+            record_processing_error(
+                vault,
+                artifact,
+                "image",
+                "no image understanding provider is available",
+            )?;
+            return inspect(vault, artifact, 400);
+        };
+        match crate::image::understand_and_chunk(
+            vault,
+            artifact,
+            provider,
+            &crate::image::ImageUnderstandingOptions::default(),
+        ) {
+            Ok(_) => resolve_processing_error(vault, artifact, "image")?,
+            Err(error) => {
+                record_processing_error(vault, artifact, "image", &error.to_string())?;
+                return Err(error.into());
+            }
+        }
+        return inspect(vault, artifact, 400);
     }
     let derived = match crate::extract::extract_text(vault, artifact) {
         Ok(derived) => {

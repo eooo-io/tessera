@@ -53,6 +53,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0020_conversation_source_metadata",
         include_str!("0020_conversation_source_metadata.sql"),
     ),
+    (
+        "0021_image_understanding",
+        include_str!("0021_image_understanding.sql"),
+    ),
 ];
 
 /// Number of migrations this build knows about.

@@ -21,6 +21,10 @@ ndarray = { workspace = true }
 tokenizers = { workspace = true }
 pdf-extract = { workspace = true }
 dom_smoothie = { workspace = true }
+image = { workspace = true }
+# See the workspace manifest: pulled in only to enable zune-jpeg's `log`
+# feature so its no-op macros still expand to valid expressions.
+zune-jpeg = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -30,6 +34,16 @@ security-framework = { workspace = true }
 zeroize = { workspace = true }
 # runtime use: temp files for pandoc DOCX interop (extract module)
 tempfile = { workspace = true }
+
+# macOS-native decode (HEIC) and OCR. The image pipeline keeps every other
+# stage portable; only these two stages bind to platform frameworks.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-vision = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-graphics = { workspace = true }
+objc2-image-io = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

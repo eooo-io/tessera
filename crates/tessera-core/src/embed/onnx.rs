@@ -1,10 +1,8 @@
 //! ONNX Runtime implementation of `EmbeddingProvider`.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{mean_pool_normalize, EmbedError, EmbeddingProvider};
 
@@ -19,13 +17,7 @@ const MAX_TOKENS: usize = 256;
 pub const TRUSTED_MANIFEST_JSON: &str =
     include_str!("../../../../spec/model-manifests/all-MiniLM-L6-v2-onnx-1.json");
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrustedModelFile {
-    pub path: String,
-    pub source_path: String,
-    pub sha256: String,
-    pub size: u64,
-}
+pub use crate::model::TrustedModelFile;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedModelManifest {
@@ -60,81 +52,36 @@ pub fn trusted_manifest() -> Result<TrustedModelManifest, EmbedError> {
 }
 
 pub fn download_url(manifest: &TrustedModelManifest, file: &TrustedModelFile) -> String {
-    format!(
-        "{}/resolve/{}/{}",
-        manifest.source_repository, manifest.revision, file.source_path
-    )
+    crate::model::download_url(&manifest.source_repository, &manifest.revision, file)
 }
 
 /// Default model directory: `$TESSERA_MODEL_DIR` or the per-user data dir.
 pub fn default_model_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("TESSERA_MODEL_DIR") {
-        return PathBuf::from(dir).join(MODEL_NAME);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    #[cfg(target_os = "macos")]
-    let base = home.join("Library/Application Support/tessera/models");
-    #[cfg(not(target_os = "macos"))]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"))
-        .join("tessera/models");
-    base.join(MODEL_NAME)
+    crate::model::model_dir(MODEL_NAME)
 }
 
 /// Whether all trusted model files are present. Loading additionally verifies
 /// their sizes and digests.
 pub fn model_present(dir: &Path) -> bool {
     trusted_manifest()
-        .map(|m| m.files.iter().all(|f| dir.join(&f.path).is_file()))
+        .map(|m| crate::model::files_present(dir, &m.files))
         .unwrap_or(false)
 }
 
 /// Verify every activated byte against the repository-controlled manifest.
 pub fn verify_model_dir(dir: &Path) -> Result<TrustedModelManifest, EmbedError> {
     let manifest = trusted_manifest()?;
-    for file in &manifest.files {
-        let path = dir.join(&file.path);
-        let metadata = std::fs::metadata(&path).map_err(|e| {
-            EmbedError::ModelVerification(format!(
-                "{} is missing or unreadable ({e}); run `tessera model fetch` or `tessera model install --source DIR`",
-                path.display()
-            ))
-        })?;
-        if !metadata.is_file() || metadata.len() != file.size {
-            return Err(EmbedError::ModelVerification(format!(
-                "{} has size {}, expected {}",
-                path.display(),
-                metadata.len(),
-                file.size
-            )));
-        }
-        let mut input = std::fs::File::open(&path).map_err(|e| {
-            EmbedError::ModelVerification(format!("cannot read {}: {e}", path.display()))
-        })?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let read = input.read(&mut buffer).map_err(|e| {
-                EmbedError::ModelVerification(format!("cannot read {}: {e}", path.display()))
-            })?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != file.sha256 {
-            return Err(EmbedError::ModelVerification(format!(
-                "{} has SHA-256 {actual}, expected {}",
-                path.display(),
-                file.sha256
-            )));
+    crate::model::verify_files(dir, &manifest.files)?;
+    Ok(manifest)
+}
+
+impl From<crate::model::ModelError> for EmbedError {
+    fn from(error: crate::model::ModelError) -> Self {
+        match error {
+            crate::model::ModelError::Missing(message) => Self::ModelMissing(message),
+            crate::model::ModelError::Verification(message) => Self::ModelVerification(message),
         }
     }
-    Ok(manifest)
 }
 
 pub struct OnnxEmbedder {

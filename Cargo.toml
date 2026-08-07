@@ -58,6 +58,20 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 pdf-extract = "0.7"
 dom_smoothie = "0.18"
 
+# Image decoding, resizing, and thumbnail encoding
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Feature unification only. Without `log`, zune-jpeg's `warn!` expands to
+# nothing in expression position, which rustc 1.97 rejects outright.
+zune-jpeg = { version = "0.5", features = ["log"] }
+
+# macOS-native image understanding: ImageIO (HEIC decode) and Vision (OCR)
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-vision = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-image-io = "0.3"
+
 # Logging / tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
