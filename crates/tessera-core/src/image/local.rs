@@ -68,15 +68,20 @@ impl ImageUnderstandingProvider for LocalImageProvider {
 mod tests {
     use super::*;
 
-    fn model_available() -> bool {
-        super::super::caption::model_present(&super::super::caption::default_model_dir())
+    /// The provider needs both the pinned caption model and a working OCR
+    /// stage, and OCR is Vision — so it is constructible on macOS only. The
+    /// model being downloaded is not on its own enough.
+    fn provider_available() -> bool {
+        cfg!(target_os = "macos")
+            && super::super::caption::model_present(&super::super::caption::default_model_dir())
     }
 
-    /// Gated on model presence, like the embedder's real-model test.
+    /// Gated on the real provider being loadable, like the embedder's
+    /// real-model test.
     #[test]
     fn derives_thumbnail_ocr_and_caption_from_one_image() {
-        if !model_available() {
-            eprintln!("SKIP: caption model not installed");
+        if !provider_available() {
+            eprintln!("SKIP: local image provider unavailable on this host");
             return;
         }
         let provider = LocalImageProvider::load().expect("load provider");
@@ -99,8 +104,8 @@ mod tests {
 
     #[test]
     fn unsupported_media_types_never_reach_the_model() {
-        if !model_available() {
-            eprintln!("SKIP: caption model not installed");
+        if !provider_available() {
+            eprintln!("SKIP: local image provider unavailable on this host");
             return;
         }
         let provider = LocalImageProvider::load().expect("load provider");
@@ -108,5 +113,23 @@ mod tests {
             .understand(b"GIF89a", "image/gif")
             .expect_err("must refuse");
         assert!(matches!(error, ImageError::UnsupportedMediaType(_)));
+    }
+
+    /// Off macOS there is no Vision, so the provider must refuse to load with
+    /// a stated reason rather than come up with a silently text-blind OCR
+    /// stage. Downloading the caption model does not change that.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_provider_refuses_to_load_without_vision() {
+        let caption_dir = super::super::caption::default_model_dir();
+        if !super::super::caption::model_present(&caption_dir) {
+            eprintln!("SKIP: caption model not installed");
+            return;
+        }
+        let error = LocalImageProvider::load().expect_err("must refuse off macOS");
+        assert!(
+            error.to_string().contains("Vision"),
+            "refusal must name the missing capability, got {error}"
+        );
     }
 }

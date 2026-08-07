@@ -2,13 +2,13 @@
 //!
 //! These tests run the real local stack end to end: Vision for OCR, the
 //! manifest-pinned ONNX vision-language model for captions, and the installed
-//! embedder for retrieval. They are gated on both models being installed,
-//! matching how the embedder's own real-model test behaves, because the
-//! acceptance criteria are about what the shipped pipeline actually does —
-//! a fixture provider could satisfy the assertions without proving anything.
+//! embedder for retrieval. A fixture provider could satisfy every assertion
+//! here without proving the pipeline works, so they use the shipped one.
 //!
-//! Enable locally with `tessera model fetch`, or point `TESSERA_MODEL_DIR` at
-//! a directory holding both model directories.
+//! They are therefore gated on macOS *and* both models being installed —
+//! OCR is Vision, so a Linux runner that has downloaded the caption model
+//! still cannot exercise this path. Enable locally with `tessera model
+//! fetch`, or point `TESSERA_MODEL_DIR` at a root holding both models.
 
 use tessera_core::artifact::{self, Sensitivity};
 use tessera_core::crypto::KdfParams;
@@ -16,8 +16,12 @@ use tessera_core::embed::onnx::{self, OnnxEmbedder};
 use tessera_core::image::{self, caption, LocalImageProvider};
 use tessera_core::{space, Vault};
 
-fn models_installed() -> bool {
-    caption::model_present(&caption::default_model_dir())
+/// Both pinned models must be installed *and* the host must be able to run
+/// the OCR stage. OCR is the macOS Vision framework, so having downloaded the
+/// caption model is not on its own enough to exercise the real pipeline.
+fn pipeline_available() -> bool {
+    cfg!(target_os = "macos")
+        && caption::model_present(&caption::default_model_dir())
         && onnx::model_present(&onnx::default_model_dir())
 }
 
@@ -140,8 +144,8 @@ fn ingest_image(
 /// Acceptance: "Screenshot with text is findable by its text (OCR path)."
 #[test]
 fn a_screenshot_is_findable_by_the_text_it_contains() {
-    if !models_installed() {
-        eprintln!("SKIP: local models not installed");
+    if !pipeline_available() {
+        eprintln!("SKIP: local image pipeline unavailable on this host");
         return;
     }
     let fixture = fixture();
@@ -191,8 +195,8 @@ fn a_screenshot_is_findable_by_the_text_it_contains() {
 /// belongs to the retrieval evaluation work (#43/#55).
 #[test]
 fn an_image_is_findable_by_its_scene_description() {
-    if !models_installed() {
-        eprintln!("SKIP: local models not installed");
+    if !pipeline_available() {
+        eprintln!("SKIP: local image pipeline unavailable on this host");
         return;
     }
     let fixture = fixture();
@@ -226,8 +230,8 @@ fn an_image_is_findable_by_its_scene_description() {
 /// Acceptance: "Model choice + version in provenance."
 #[test]
 fn provenance_records_the_exact_model_and_version_that_ran() {
-    if !models_installed() {
-        eprintln!("SKIP: local models not installed");
+    if !pipeline_available() {
+        eprintln!("SKIP: local image pipeline unavailable on this host");
         return;
     }
     let fixture = fixture();
