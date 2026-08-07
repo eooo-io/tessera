@@ -118,15 +118,25 @@ mod tests {
     /// Off macOS there is no Vision, so the provider must refuse to load with
     /// a stated reason rather than come up with a silently text-blind OCR
     /// stage. Downloading the caption model does not change that.
-    #[cfg(not(target_os = "macos"))]
+    ///
+    /// Deliberately compiled on every platform and skipped at runtime on
+    /// macOS: a `cfg`-gated body is only ever type-checked on the host that
+    /// excludes it, which is how this test first reached CI broken.
     #[test]
     fn the_provider_refuses_to_load_without_vision() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
         let caption_dir = super::super::caption::default_model_dir();
         if !super::super::caption::model_present(&caption_dir) {
             eprintln!("SKIP: caption model not installed");
             return;
         }
-        let error = LocalImageProvider::load().expect_err("must refuse off macOS");
+        // `expect_err` would demand Debug on the provider, which owns ONNX
+        // sessions that do not implement it.
+        let Err(error) = LocalImageProvider::load() else {
+            panic!("loading the provider must fail without Vision");
+        };
         assert!(
             error.to_string().contains("Vision"),
             "refusal must name the missing capability, got {error}"
