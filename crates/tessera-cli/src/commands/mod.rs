@@ -155,11 +155,20 @@ mod model_install_tests {
         std::fs::create_dir(&target).expect("active dir");
         std::fs::write(target.join("active-marker"), b"last working install").expect("marker");
 
-        let error = activate_model(&target, |staging| {
-            std::fs::write(staging.join("model.onnx"), b"substituted")?;
-            std::fs::write(staging.join("tokenizer.json"), b"{}")?;
-            Ok(())
-        })
+        let error = activate_model(
+            &target,
+            tessera_core::embed::onnx::TRUSTED_MANIFEST_JSON,
+            |staging| {
+                tessera_core::embed::onnx::verify_model_dir(staging)
+                    .map(|_| ())
+                    .map_err(Into::into)
+            },
+            |staging| {
+                std::fs::write(staging.join("model.onnx"), b"substituted")?;
+                std::fs::write(staging.join("tokenizer.json"), b"{}")?;
+                Ok(())
+            },
+        )
         .expect_err("untrusted stage must fail");
 
         assert!(error.to_string().contains("verification"));
@@ -170,15 +179,43 @@ mod model_install_tests {
     }
 }
 
+/// Which pinned local model a `tessera model` command applies to.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ModelSelector {
+    /// Both models
+    All,
+    /// all-MiniLM-L6-v2 — semantic retrieval
+    Embedding,
+    /// vit-gpt2-image-captioning — image captions
+    Caption,
+}
+
+impl ModelSelector {
+    fn includes_embedding(self) -> bool {
+        matches!(self, Self::All | Self::Embedding)
+    }
+
+    fn includes_caption(self) -> bool {
+        matches!(self, Self::All | Self::Caption)
+    }
+}
+
 #[derive(Subcommand)]
 pub enum ModelCommand {
-    /// Download and verify the embedding model from its pinned source
-    Fetch,
+    /// Download and verify pinned models from their immutable sources
+    Fetch {
+        /// Which model to fetch (default: both)
+        #[arg(long, value_enum, default_value_t = ModelSelector::All)]
+        model: ModelSelector,
+    },
     /// Verify and atomically activate model files copied from another machine
     Install {
-        /// Directory containing model.onnx and tokenizer.json
+        /// Directory containing the model files named by the manifest
         #[arg(long)]
         source: std::path::PathBuf,
+        /// Which model the source directory holds
+        #[arg(long, value_enum, default_value_t = ModelSelector::Embedding)]
+        model: ModelSelector,
     },
     /// Build or resume a shadow vector index, then atomically activate it
     Reindex {
@@ -191,7 +228,11 @@ pub enum ModelCommand {
     /// Request cooperative cancellation without touching the active index
     ReindexCancel,
     /// Show model installation status
-    Status,
+    Status {
+        /// Which model to report on (default: both)
+        #[arg(long, value_enum, default_value_t = ModelSelector::All)]
+        model: ModelSelector,
+    },
 }
 
 #[derive(Subcommand)]
@@ -523,6 +564,23 @@ fn resolve_space(vault: &Vault, flag: Option<String>) -> anyhow::Result<SpaceId>
     }
 }
 
+/// Loads the local image provider at most once per batch, and remembers a
+/// load failure so a missing model reports the same reason for every image
+/// instead of retrying an expensive load per file.
+#[derive(Default)]
+struct LazyImageProvider {
+    loaded: Option<Result<tessera_core::image::LocalImageProvider, String>>,
+}
+
+impl LazyImageProvider {
+    fn get(&mut self) -> Result<&tessera_core::image::LocalImageProvider, String> {
+        let entry = self.loaded.get_or_insert_with(|| {
+            tessera_core::image::LocalImageProvider::load().map_err(|error| error.to_string())
+        });
+        entry.as_ref().map_err(|error| error.clone())
+    }
+}
+
 /// Run the ingestion pipeline on staged files: intake, then extraction and
 /// chunking for text types (best-effort; failures leave items pending).
 fn run_inbox_pipeline(
@@ -531,7 +589,62 @@ fn run_inbox_pipeline(
 ) -> anyhow::Result<Vec<tessera_core::ArtifactId>> {
     let report = tessera_core::inbox::process(vault, space)?;
     let mut ingested = Vec::new();
+    // Loaded once for the whole batch, and only if an image actually arrived:
+    // the vision model costs seconds to load and most batches are documents.
+    let mut image_provider = LazyImageProvider::default();
     for (path, artifact_id) in &report.ingested {
+        let media_type = tessera_core::inbox::media_type_for(path);
+        if tessera_core::image::decode::is_supported(media_type) {
+            match image_provider.get() {
+                Ok(provider) => {
+                    match tessera_core::image::understand_and_chunk(
+                        vault,
+                        artifact_id,
+                        provider,
+                        &tessera_core::image::ImageUnderstandingOptions::default(),
+                    ) {
+                        Ok(derivation) => {
+                            tessera_core::review::resolve_processing_error(
+                                vault,
+                                artifact_id,
+                                "image",
+                            )?;
+                            println!(
+                                "  image understood locally ({}, {})",
+                                derivation.caption_model, derivation.ocr_tool
+                            );
+                        }
+                        Err(error) => {
+                            tessera_core::review::record_processing_error(
+                                vault,
+                                artifact_id,
+                                "image",
+                                &error.to_string(),
+                            )?;
+                            eprintln!(
+                                "warning: image understanding failed for {}: {error}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    tessera_core::review::record_processing_error(
+                        vault,
+                        artifact_id,
+                        "image",
+                        &error.to_string(),
+                    )?;
+                    eprintln!(
+                        "warning: image understanding unavailable for {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+            println!("Ingested {}  {}", artifact_id.0, path.display());
+            ingested.push(artifact_id.clone());
+            continue;
+        }
         match tessera_core::extract::extract_text(vault, artifact_id) {
             Ok(Some(derived)) => {
                 tessera_core::review::resolve_processing_error(vault, artifact_id, "extract")?;
@@ -607,12 +720,94 @@ fn parse_csv(s: &str) -> Vec<String> {
 /// Populate a sibling staging directory, verify every byte, then switch it
 /// into place. The current installation remains active until verification
 /// succeeds, and is restored if activation itself fails.
+/// Everything `model install` needs to place one model's files atomically.
+struct InstallPlan<'a> {
+    target: std::path::PathBuf,
+    files: Vec<tessera_core::model::TrustedModelFile>,
+    manifest_json: &'a str,
+    verify: &'a dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+}
+
+/// Print one model's pinned identity and whether its bytes verify.
+/// Unverified models are collected so the command can still exit non-zero
+/// after reporting on every model the owner asked about.
+#[allow(clippy::too_many_arguments)]
+fn print_model_status(
+    model_version: &str,
+    dir: &std::path::Path,
+    source_repository: &str,
+    revision: &str,
+    license: &str,
+    tokenizer_version: &str,
+    runtime_versions: &str,
+    provenance: &str,
+    verified: anyhow::Result<()>,
+    unverified: &mut Vec<String>,
+) {
+    println!("model:    {model_version}");
+    println!("path:     {}", dir.display());
+    println!("source:   {source_repository}");
+    println!("revision: {revision}");
+    println!("license:  {license}");
+    println!("tokenizer: {tokenizer_version}");
+    println!("runtime:  {runtime_versions}");
+    println!("provenance: {provenance}");
+    match verified {
+        Ok(()) => println!("status:   verified"),
+        Err(error) => {
+            println!("status:   unavailable — {error}");
+            println!("recovery: `tessera model fetch` (online) or `tessera model install --source DIR` (offline)");
+            unverified.push(model_version.to_owned());
+        }
+    }
+    println!();
+}
+
+/// Download one model's pinned files and activate them atomically.
+fn fetch_pinned_files(
+    target: &std::path::Path,
+    model_version: &str,
+    revision: &str,
+    files: &[tessera_core::model::TrustedModelFile],
+    source_repository: &str,
+    manifest_json: &str,
+    verify: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if verify(target).is_ok() {
+        println!(
+            "Verified {model_version} already active at {}",
+            target.display()
+        );
+        return Ok(());
+    }
+    activate_model(target, manifest_json, verify, |staging| {
+        for file in files {
+            let partial = staging.join(format!("{}.part", file.path));
+            let url = tessera_core::model::download_url(source_repository, revision, file);
+            println!("Fetching {} from pinned revision {revision} …", file.path);
+            let status = std::process::Command::new("curl")
+                .args(["-L", "--fail", "--progress-bar", "-o"])
+                .arg(&partial)
+                .arg(&url)
+                .status()
+                .context("running curl")?;
+            if !status.success() {
+                bail!("download failed for {}", file.path);
+            }
+            std::fs::rename(partial, staging.join(&file.path))?;
+        }
+        Ok(())
+    })?;
+    println!("Verified {model_version} activated at {}", target.display());
+    Ok(())
+}
+
 fn activate_model(
     target: &std::path::Path,
+    manifest_json: &str,
+    verify: impl Fn(&std::path::Path) -> anyhow::Result<()>,
     populate: impl FnOnce(&std::path::Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    use tessera_core::embed::onnx;
-
     let parent = target
         .parent()
         .context("model target has no parent directory")?;
@@ -630,11 +825,8 @@ fn activate_model(
 
     let prepared = (|| {
         populate(&staging)?;
-        onnx::verify_model_dir(&staging)?;
-        std::fs::write(
-            staging.join("trusted-manifest.json"),
-            onnx::TRUSTED_MANIFEST_JSON,
-        )?;
+        verify(&staging)?;
+        std::fs::write(staging.join("trusted-manifest.json"), manifest_json)?;
         Ok::<_, anyhow::Error>(())
     })();
     if let Err(error) = prepared {
@@ -855,6 +1047,7 @@ fn review_interactive(vault: &Vault) -> anyhow::Result<()> {
         println!("No pending artifacts.");
         return Ok(());
     }
+    let mut retry_image_provider = LazyImageProvider::default();
 
     for art in pending {
         let mut item = tessera_core::review::inspect(vault, &art.id, 400)?;
@@ -914,13 +1107,34 @@ fn review_interactive(vault: &Vault) -> anyhow::Result<()> {
                 "p" => {
                     item = tessera_core::review::inspect(vault, &art.id, 4000)?;
                 }
-                "r" => match tessera_core::review::retry_processing(vault, &art.id) {
-                    Ok(retried) => {
-                        item = retried;
-                        println!("processing retry completed");
+                "r" => {
+                    // Only pay for the vision model when the item under
+                    // review is actually an image.
+                    let provider = if tessera_core::image::decode::is_supported(&art.media_type) {
+                        match retry_image_provider.get() {
+                            Ok(provider) => Some(provider),
+                            Err(error) => {
+                                println!("image understanding unavailable: {error}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    match tessera_core::review::retry_processing_with(
+                        vault,
+                        &art.id,
+                        provider.map(|provider| {
+                            provider as &dyn tessera_core::image::ImageUnderstandingProvider
+                        }),
+                    ) {
+                        Ok(retried) => {
+                            item = retried;
+                            println!("processing retry completed");
+                        }
+                        Err(error) => println!("processing retry failed: {error}"),
                     }
-                    Err(error) => println!("processing retry failed: {error}"),
-                },
+                }
                 "x" => {
                     artifact::set_state_by(
                         vault,
@@ -1926,65 +2140,120 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
         }
         Command::Model { action } => {
             use tessera_core::embed::onnx;
+            use tessera_core::image::caption;
             let dir = onnx::default_model_dir();
             match action {
-                ModelCommand::Status => {
-                    let manifest = onnx::trusted_manifest()?;
-                    println!("model:    {}", manifest.model_version);
-                    println!("path:     {}", dir.display());
-                    println!("source:   {}", manifest.source_repository);
-                    println!("revision: {}", manifest.revision);
-                    println!("license:  {}", manifest.license);
-                    println!("tokenizer: {}", manifest.tokenizer_version);
-                    println!("runtime:  {}", manifest.runtime_versions);
-                    println!("provenance: {}", manifest.provenance);
-                    match onnx::verify_model_dir(&dir) {
-                        Ok(_) => {
-                            println!("status:   verified");
-                            Ok(())
-                        }
-                        Err(error) => {
-                            println!("status:   unavailable — {error}");
-                            println!("recovery: `tessera model fetch` (online) or `tessera model install --source DIR` (offline)");
-                            bail!("model is not verified")
-                        }
+                ModelCommand::Status { model } => {
+                    let mut unverified = Vec::new();
+                    if model.includes_embedding() {
+                        let manifest = onnx::trusted_manifest()?;
+                        print_model_status(
+                            &manifest.model_version,
+                            &dir,
+                            &manifest.source_repository,
+                            &manifest.revision,
+                            &manifest.license,
+                            &manifest.tokenizer_version,
+                            &manifest.runtime_versions,
+                            &manifest.provenance,
+                            onnx::verify_model_dir(&dir).map(|_| ()).map_err(Into::into),
+                            &mut unverified,
+                        );
+                    }
+                    if model.includes_caption() {
+                        let manifest = caption::trusted_manifest()?;
+                        let caption_dir = caption::default_model_dir();
+                        print_model_status(
+                            &manifest.model_version,
+                            &caption_dir,
+                            &manifest.source_repository,
+                            &manifest.revision,
+                            &manifest.license,
+                            &manifest.tokenizer_version,
+                            &manifest.runtime_versions,
+                            &manifest.provenance,
+                            caption::verify_model_dir(&caption_dir)
+                                .map(|_| ())
+                                .map_err(Into::into),
+                            &mut unverified,
+                        );
+                    }
+                    if unverified.is_empty() {
+                        Ok(())
+                    } else {
+                        bail!("not verified: {}", unverified.join(", "))
                     }
                 }
-                ModelCommand::Fetch => {
-                    if onnx::verify_model_dir(&dir).is_ok() {
-                        println!("Verified model already active at {}", dir.display());
-                        return Ok(());
+                ModelCommand::Fetch { model } => {
+                    if model.includes_embedding() {
+                        let manifest = onnx::trusted_manifest()?;
+                        fetch_pinned_files(
+                            &dir,
+                            &manifest.model_version,
+                            &manifest.revision,
+                            &manifest.files,
+                            &manifest.source_repository,
+                            onnx::TRUSTED_MANIFEST_JSON,
+                            &|staging| {
+                                onnx::verify_model_dir(staging)
+                                    .map(|_| ())
+                                    .map_err(Into::into)
+                            },
+                        )?;
                     }
-                    let manifest = onnx::trusted_manifest()?;
-                    activate_model(&dir, |staging| {
-                        for file in &manifest.files {
-                            let target = staging.join(&file.path);
-                            let partial = staging.join(format!("{}.part", file.path));
-                            let url = onnx::download_url(&manifest, file);
-                            println!(
-                                "Fetching {} from pinned revision {} …",
-                                file.path, manifest.revision
-                            );
-                            let status = std::process::Command::new("curl")
-                                .args(["-L", "--fail", "--progress-bar", "-o"])
-                                .arg(&partial)
-                                .arg(&url)
-                                .status()
-                                .context("running curl")?;
-                            if !status.success() {
-                                bail!("download failed for {}", file.path);
-                            }
-                            std::fs::rename(partial, target)?;
-                        }
-                        Ok(())
-                    })?;
-                    println!("Verified model activated at {}", dir.display());
+                    if model.includes_caption() {
+                        let manifest = caption::trusted_manifest()?;
+                        fetch_pinned_files(
+                            &caption::default_model_dir(),
+                            &manifest.model_version,
+                            &manifest.revision,
+                            &manifest.files,
+                            &manifest.source_repository,
+                            caption::TRUSTED_MANIFEST_JSON,
+                            &|staging| {
+                                caption::verify_model_dir(staging)
+                                    .map(|_| ())
+                                    .map_err(Into::into)
+                            },
+                        )?;
+                    }
                     Ok(())
                 }
-                ModelCommand::Install { source } => {
-                    let manifest = onnx::trusted_manifest()?;
-                    activate_model(&dir, |staging| {
-                        for file in &manifest.files {
+                ModelCommand::Install { source, model } => {
+                    if model == ModelSelector::All {
+                        bail!("`--model all` cannot be installed from one source directory; install each model separately");
+                    }
+                    let plan = if model.includes_caption() {
+                        InstallPlan {
+                            target: caption::default_model_dir(),
+                            files: caption::trusted_manifest()?.files,
+                            manifest_json: caption::TRUSTED_MANIFEST_JSON,
+                            verify: &|staging| {
+                                caption::verify_model_dir(staging)
+                                    .map(|_| ())
+                                    .map_err(Into::into)
+                            },
+                        }
+                    } else {
+                        InstallPlan {
+                            target: dir.clone(),
+                            files: onnx::trusted_manifest()?.files,
+                            manifest_json: onnx::TRUSTED_MANIFEST_JSON,
+                            verify: &|staging| {
+                                onnx::verify_model_dir(staging)
+                                    .map(|_| ())
+                                    .map_err(Into::into)
+                            },
+                        }
+                    };
+                    let InstallPlan {
+                        target,
+                        files,
+                        manifest_json,
+                        verify,
+                    } = plan;
+                    activate_model(&target, manifest_json, verify, |staging| {
+                        for file in &files {
                             std::fs::copy(source.join(&file.path), staging.join(&file.path))
                                 .with_context(|| {
                                     format!("copying {} from {}", file.path, source.display())
@@ -1992,7 +2261,7 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         }
                         Ok(())
                     })?;
-                    println!("Verified offline model activated at {}", dir.display());
+                    println!("Verified offline model activated at {}", target.display());
                     Ok(())
                 }
                 ModelCommand::Reindex { max_chunks } => {

@@ -1,4 +1,10 @@
-# Embedding model supply chain and portability
+# Local model supply chain and portability
+
+Tessera installs two pinned local models: the embedder that defines the query
+space, and the vision-language model that captions images. Both are bound by
+repository-controlled manifests and verified byte-for-byte before loading. The
+sections below describe the embedder first; the caption model follows the same
+rules and is covered under [Image captioning model](#image-captioning-model).
 
 Tessera v1 accepts one query-compatible embedding space:
 `all-MiniLM-L6-v2@onnx-1`, 384 dimensions. This is a versioned compatibility
@@ -34,10 +40,12 @@ bytes, substituted tokenizer files, or activation errors leave the last
 working installation intact. `OnnxEmbedder::load` repeats verification before
 ONNX Runtime sees the files; a stale `models.lock` cannot authorize anything.
 
-Owner-visible source, revision, license, runtime, path, and verification state:
+Owner-visible source, revision, license, runtime, path, and verification state
+for every installed model:
 
 ```bash
-tessera model status
+tessera model status                    # both models
+tessera model status --model embedding  # just the query space
 ```
 
 ## Offline and cross-host provisioning
@@ -54,6 +62,8 @@ directory. Stage, verify, and atomically install them:
 ```bash
 # Linux example; --vault is only needed for vault/index commands.
 tessera model install --source /media/verified/all-MiniLM-L6-v2
+tessera model install --model caption \
+  --source /media/verified/vit-gpt2-image-captioning
 tessera model status
 tessera --vault /srv/V.tessera query "owner question"
 ```
@@ -87,3 +97,43 @@ refused, and the fixed 384-dimensional table rejects any other dimensions.
 Receipts bind the exact `model_version` used for semantic retrieval. Copying a
 vault does not weaken that binding: missing or incompatible local assets stop
 the query before disclosure.
+
+## Image captioning model
+
+Image understanding adds a second pinned asset:
+`vit-gpt2-image-captioning@onnx-1`, manifested at
+[`spec/model-manifests/vit-gpt2-image-captioning-onnx-1.json`](../spec/model-manifests/vit-gpt2-image-captioning-onnx-1.json).
+It is the Apache-2.0 ONNX export of `nlpconnect/vit-gpt2-image-captioning`,
+pinned to an immutable upstream revision and bound by the same size and
+SHA-256 checks the embedder uses — `verify_files` is one shared implementation,
+not two parallel ones.
+
+The quantized encoder and the *unmerged* decoder are pinned deliberately. The
+unmerged export takes only `input_ids` and `encoder_hidden_states`, so greedy
+decoding needs no key/value cache plumbing, and greedy decoding in turn keeps a
+derivation reproducible: the same pixels must always yield the same caption or
+image derivations stop being idempotent.
+
+```bash
+tessera model fetch                   # both models
+tessera model fetch --model caption   # captions only (~245 MB)
+tessera model status --model caption
+```
+
+Defaults are siblings of the embedder:
+
+- macOS: `~/Library/Application Support/tessera/models/vit-gpt2-image-captioning`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/tessera/models/vit-gpt2-image-captioning`
+
+OCR is not a downloaded asset. It runs through the macOS Vision framework, so
+its provenance records the recognizer *revision* and OS version rather than a
+digest — recognition output changes between revisions, and a derivation is only
+reproducible against the revision that produced it. Off macOS, image
+understanding fails closed with an explicit reason instead of silently
+producing captions with no recognized text.
+
+Captions and OCR text are the searchable surface for images: they become one
+`derived_text` row, chunked and embedded like any document. An image with
+neither is refused rather than stored as an unsearchable derivation. Cloud
+captioning stays refused unless the owner opts that exact item in, and the
+refusal happens before the encrypted original is decrypted.

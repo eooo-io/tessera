@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "model_name": "vit-gpt2-image-captioning",
+  "model_version": "vit-gpt2-image-captioning@onnx-1",
+  "source_repository": "https://huggingface.co/Xenova/vit-gpt2-image-captioning",
+  "revision": "215b4edcb7ec1fad5905a18a03f7b2007f6fabd0",
+  "license": "Apache-2.0",
+  "image_size": 224,
+  "hidden_size": 768,
+  "max_new_tokens": 24,
+  "decoder_start_token_id": 50256,
+  "eos_token_id": 50256,
+  "tokenizer_version": "tokenizer.json@sha256:6e785cd4f004c9291dadeba7d8d1c2871318d368a1cfcd416c0571dcd8f11413",
+  "runtime_versions": "ort 2.0.0-rc.12; tokenizers 0.21",
+  "provenance": "ONNX export by Xenova of nlpconnect/vit-gpt2-image-captioning (Apache-2.0), pinned to the immutable upstream revision. The two ONNX digests are the upstream LFS digests; the tokenizer digest was computed over the fetched bytes and is bound here by repository review. The unmerged decoder export is used deliberately: it takes only input_ids and encoder_hidden_states, so greedy decoding needs no key/value cache plumbing.",
+  "files": [
+    {
+      "path": "encoder_model.onnx",
+      "source_path": "onnx/encoder_model_quantized.onnx",
+      "sha256": "6f6e2e27c11303cf533682184543333e7ecb930a734197a0272a1e408aba2766",
+      "size": 87453213
+    },
+    {
+      "path": "decoder_model.onnx",
+      "source_path": "onnx/decoder_model_quantized.onnx",
+      "sha256": "4cd3a527b1acd9893dec2ef8f02b5e759c0365e365976a2f44313c6095a8a256",
+      "size": 156278186
+    },
+    {
+      "path": "tokenizer.json",
+      "source_path": "tokenizer.json",
+      "sha256": "6e785cd4f004c9291dadeba7d8d1c2871318d368a1cfcd416c0571dcd8f11413",
+      "size": 2107928
+    }
+  ]
+}

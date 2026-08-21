@@ -125,7 +125,10 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
         let mut stmt = conn.prepare(
             "SELECT blob_hash FROM derived_text
              UNION SELECT blob_hash FROM summaries
-             UNION SELECT normal_form_blob_hash FROM conversation_archives",
+             UNION SELECT normal_form_blob_hash FROM conversation_archives
+             UNION SELECT thumbnail_blob_hash FROM image_derivations
+             UNION SELECT ocr_blob_hash FROM image_derivations
+             UNION SELECT caption_blob_hash FROM image_derivations",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
