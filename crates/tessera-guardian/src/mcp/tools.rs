@@ -45,7 +45,10 @@ fn receipt_error_code(error: &ReceiptError) -> &'static str {
         ReceiptError::Disclosure(DisclosureError::NotPermitted(_)) => "policy_denied",
         ReceiptError::Disclosure(DisclosureError::BadChunk(_))
         | ReceiptError::Disclosure(DisclosureError::Blob(BlobError::IntegrityError(_)))
-        | ReceiptError::ChainBroken { .. } => "corrupt_evidence",
+        | ReceiptError::ChainBroken { .. }
+        | ReceiptError::Malformed { .. }
+        | ReceiptError::UnauthenticatedLegacy { .. }
+        | ReceiptError::CryptographicallyInvalid { .. } => "corrupt_evidence",
         ReceiptError::NotFound(_)
         | ReceiptError::Disclosure(DisclosureError::NoSummary(_))
         | ReceiptError::Disclosure(DisclosureError::NotFound(_))

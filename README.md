@@ -39,7 +39,7 @@ A **SwiftUI Mac app** (`mac/`) provides the desktop interface for spaces, lens b
 - **Artifacts** — Files/documents with metadata, tags, and version history
 - **Lenses** — Reusable access policies defining what an agent can see and how
 - **Sessions** — Time-bounded uses of an immutable pairing and lens revision
-- **Receipts** — Hash-chained records of what Tessera accessed and disclosed
+- **Receipts** — Encrypted, owner-authenticated records of what Tessera accessed and disclosed
 
 ## Development
 
@@ -94,6 +94,16 @@ are documented in
 Integrity classifications, consistency-barrier backup, restore verification,
 and the no-fabricated-repair boundary are documented in
 [`docs/recovery-runbook.md`](docs/recovery-runbook.md).
+
+Finalized receipt payloads are stored in encrypted `.trc` containers. Their
+chain uses vault-derived keyed tokens, so `tessera receipts verify` proves
+owner-keyed local authenticity after unlock. It does not provide a public
+signature, identity attestation, external timestamp, or non-repudiation.
+Legacy plaintext receipt chains require an explicit, restart-safe `tessera
+receipts migrate --yes`. `receipts show` and `receipts export` produce
+plaintext owner-review material and warn accordingly. The exact threat and
+recovery boundary is recorded in
+[`ADR-0001`](docs/adr/0001-receipt-protection-v0.1.md).
 
 ## Quarantine review
 

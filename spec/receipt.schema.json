@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://tessera.ai/schemas/receipt.json",
   "title": "Tessera Receipt",
-  "description": "Versioned, hash-chained record of an exact Tessera disclosure session. Receipts without schema_version are legacy v1 records.",
+  "description": "Plaintext logical export of an exact Tessera disclosure session. Format-v2 vaults store this object inside an encrypted, authenticated container and use owner-keyed chain tokens. The export does not authenticate itself. Receipts without schema_version are logical schema v1 records.",
   "type": "object",
   "required": ["receipt_id", "session_id", "agent", "lens", "purpose", "started_at", "queries", "summary", "seq"],
   "properties": {
@@ -11,8 +11,8 @@
     "session_id": { "type": "string", "pattern": "^sess_" },
     "pairing_id": { "type": "string" },
     "seq": { "type": "integer", "minimum": 0 },
-    "prev_receipt_hash": { "$ref": "#/$defs/nullableHash" },
-    "self_hash": { "$ref": "#/$defs/nullableHash" },
+    "prev_receipt_hash": { "description": "Previous owner-keyed chain token; not publicly verifiable from an export.", "$ref": "#/$defs/nullableHash" },
+    "self_hash": { "description": "Owner-keyed local authentication token; not a signature and not publicly recomputable.", "$ref": "#/$defs/nullableHash" },
     "agent": {
       "type": "object",
       "required": ["agent_id", "name"],

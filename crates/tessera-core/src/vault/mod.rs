@@ -182,6 +182,27 @@ impl Vault {
         &self.manifest
     }
 
+    /// Persist a supported format transition and keep this open handle in
+    /// sync. Receipt migration is the sole production caller.
+    pub(crate) fn set_format_version_for_migration(
+        &mut self,
+        version: u32,
+    ) -> Result<(), VaultError> {
+        if version == 0 || version > FORMAT_VERSION {
+            return Err(VaultError::Manifest(ManifestError::UnsupportedVersion {
+                found: version,
+                supported: FORMAT_VERSION,
+            }));
+        }
+        let previous = self.manifest.format_version;
+        self.manifest.format_version = version;
+        if let Err(error) = self.manifest.save(&self.path.join("tessera.json")) {
+            self.manifest.format_version = previous;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     /// The vault database connection.
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn

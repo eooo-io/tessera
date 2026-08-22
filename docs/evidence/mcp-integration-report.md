@@ -63,10 +63,11 @@ test topology and assertions.
 
 ## Known limitations and open dependency
 
-- Issue #39 remains an explicit dependency of #35. Receipt v2 integrity and
-  chain verification are covered, but the owner has not selected the receipt
-  confidentiality/authenticity trust model. This report therefore does **not**
-  claim that #35 is complete or that stored receipts satisfy #39.
+- The #39 implementation encrypts complete receipt payloads and authenticates
+  the local chain with vault-derived keys. This removes the former storage
+  blocker for #35, subject to issue review and the release gate. It is not a
+  public signature, external timestamp, non-repudiation mechanism, or proof
+  against a process holding the unlocked DEK.
 - Purpose is an owner-approved audit declaration and receipt binding. Tessera
   does not infer whether a natural-language purpose semantically justifies a
   query.

@@ -69,14 +69,19 @@ the applied mode and downgrade are recorded in the receipt.
 
 Every disclosing session snapshots the pairing id, agent label, purpose, exact
 effective lens policy and policy hash, TTL-derived session timestamps, and
-disclosure evidence. This proves what Tessera recorded and disclosed under the
-selected receipt-integrity design; it does not prove the agent obeyed the
-declared purpose or deleted prior context.
+disclosure evidence. The complete finalized receipt is encrypted and
+authenticated under keys derived from the vault DEK. Its keyed chain token
+binds finalization order and exact receipt content to the unlocked owner key.
+Verification also reconstructs the recorded disclosures from authenticated
+vault evidence.
 
-The receipt confidentiality/authenticity guarantees are defined separately by
-issue #39. Until that baseline lands, do not describe the current unkeyed hash
-chain as a signature, immutable record, non-repudiation, or proof against a
-vault writer who can regenerate the entire chain.
+This proves what the unlocked Tessera vault recorded. It does not prove the
+agent obeyed the declared purpose, deleted prior context, or represented a
+particular legal identity. A process holding the unlocked key can read and
+forge local receipts. The chain is not a public signature, non-repudiation,
+remote attestation, an external timestamp, or proof against an unlocked vault
+writer. The precise protection and recovery boundary is documented in
+[`ADR-0001`](adr/0001-receipt-protection-v0.1.md).
 
 ## Operator rules
 

@@ -1,6 +1,13 @@
 # Rust
 /target/
 **/*.rs.bk
+debug/
+release/
+*.rlib
+*.prof*
+*.log
+__pycache__/
+*.py[cod]
 
 # Node (should not appear in this repo, but guard against accidental install)
 node_modules/

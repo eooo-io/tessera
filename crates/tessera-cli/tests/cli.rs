@@ -65,6 +65,76 @@ fn keyslot_listing_and_removal_guard_are_owner_visible() {
 }
 
 #[test]
+fn receipts_migration_requires_confirmation_and_exports_warn_plaintext() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("V.tessera");
+    tessera(&vault_path).args(["init"]).assert().success();
+
+    let vault = tessera_core::Vault::open(&vault_path, "test-passphrase").expect("open");
+    let space = tessera_core::space::create(&vault, "Receipts", None).expect("space");
+    let lens = tessera_core::LensPolicy::new("owner-review", vec![space]);
+    let receipt = tessera_core::receipt::Session::open(
+        &vault,
+        tessera_core::receipt::AgentRef {
+            agent_id: "agent_cli_receipt".into(),
+            name: "CLI Receipt Agent".into(),
+        },
+        &lens,
+        "CLI receipt export",
+        false,
+    )
+    .expect("session")
+    .finalize()
+    .expect("receipt");
+    drop(vault);
+
+    tessera(&vault_path)
+        .args(["receipts", "migrate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+    tessera(&vault_path)
+        .args(["receipts", "migrate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No legacy receipts"));
+
+    tessera(&vault_path)
+        .args(["receipts", "show", &receipt.receipt_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CLI receipt export"))
+        .stderr(predicate::str::contains("PLAINTEXT"));
+
+    tessera(&vault_path)
+        .args(["receipts", "export", &receipt.receipt_id, "--html"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<!doctype html>"))
+        .stderr(predicate::str::contains("PLAINTEXT"));
+
+    let export = dir.path().join("receipt.json");
+    tessera(&vault_path)
+        .args(["receipts", "export", &receipt.receipt_id, "--out"])
+        .arg(&export)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PLAINTEXT"));
+    assert!(std::fs::read_to_string(export)
+        .expect("export")
+        .contains("CLI receipt export"));
+
+    tessera(&vault_path)
+        .args(["receipts", "verify"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("owner-authenticated")
+                .and(predicate::str::contains("local chain head")),
+        );
+}
+
+#[test]
 fn space_create_list_and_tree() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("V.tessera");
