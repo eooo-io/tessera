@@ -459,6 +459,12 @@ pub enum KeyCommand {
 
 #[derive(Subcommand)]
 pub enum ReceiptsCommand {
+    /// Convert a complete legacy plaintext receipt chain to protected storage
+    Migrate {
+        /// Confirm the one-way storage migration
+        #[arg(long)]
+        yes: bool,
+    },
     /// List all receipts, oldest first
     List,
     /// Print one receipt as JSON
@@ -1935,8 +1941,24 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
         }
         Command::Receipts { action } => {
             use tessera_core::receipt;
-            let vault = open_vault(&vault_path)?;
+            let mut vault = open_vault(&vault_path)?;
             match action {
+                ReceiptsCommand::Migrate { yes } => {
+                    if !yes {
+                        bail!(
+                            "receipt migration rewrites legacy plaintext evidence; close Guardian sessions, make an offline bundle copy, and re-run with --yes"
+                        );
+                    }
+                    let migrated = receipt::migrate_legacy_receipts(&mut vault)?;
+                    if migrated == 0 {
+                        println!("No legacy receipts require migration.");
+                    } else {
+                        println!(
+                            "Migrated and owner-authenticated {migrated} receipt(s); protected chain verified."
+                        );
+                    }
+                    Ok(())
+                }
                 ReceiptsCommand::List => {
                     let receipts = receipt::list(&vault)?;
                     if receipts.is_empty() {
@@ -1957,6 +1979,9 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
                 ReceiptsCommand::Show { id } => {
                     let r = receipt::load(&vault, &id)?;
+                    eprintln!(
+                        "WARNING: PLAINTEXT receipt follows. Redirect and store it only in an owner-approved location."
+                    );
                     println!("{}", serde_json::to_string_pretty(&r)?);
                     Ok(())
                 }
@@ -1971,15 +1996,25 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                         Some(path) => {
                             std::fs::write(&path, content)
                                 .with_context(|| format!("writing {}", path.display()))?;
-                            println!("Wrote {}", path.display());
+                            println!(
+                                "Wrote PLAINTEXT receipt export to {}. Protect or delete it after use.",
+                                path.display()
+                            );
                         }
-                        None => println!("{content}"),
+                        None => {
+                            eprintln!(
+                                "WARNING: PLAINTEXT receipt export follows. Redirect and store it only in an owner-approved location."
+                            );
+                            println!("{content}");
+                        }
                     }
                     Ok(())
                 }
                 ReceiptsCommand::Verify => {
                     let n = receipt::verify(&vault)?;
-                    println!("OK — {n} receipt(s) verified, chain intact");
+                    println!(
+                        "OK: {n} receipt(s) decrypted, owner-authenticated, and linked to the local chain head."
+                    );
                     Ok(())
                 }
             }

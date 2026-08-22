@@ -1,6 +1,6 @@
 # Tessera Vault Bundle Format
 
-**Format version: 1** (see `FORMAT_VERSION` in `tessera-core/src/vault/manifest.rs`)
+**Format version: 2** (see `FORMAT_VERSION` in `tessera-core/src/vault/manifest.rs`)
 
 > **Policy:** this document MUST be updated in the same commit as any code
 > change that affects the on-disk format. A reader implementing from this
@@ -19,7 +19,7 @@ MyVault.tessera/
 ├── vault.db         # SQLite database, WAL mode (§3)
 ├── keyslot.bin      # key slots wrapping the DEK (§4)
 ├── blobs/           # content-addressed encrypted blob store (§5)
-├── receipts/        # finalized, hash-chained access receipts (§6)
+├── receipts/        # protected, owner-authenticated access receipts (§6)
 └── inbox/           # plaintext staging for content not yet ingested (§7)
 ```
 
@@ -35,7 +35,8 @@ Invariants that apply to the whole bundle:
   captions, summaries, thumbnails — lives in `blobs/` encrypted. Plaintext
   content appears only in `inbox/` (pre-ingestion) and, as a documented v1
   limitation, in `vault.db` *metadata* (filenames, tags, offsets — not
-  content). Full metadata encryption is future work.
+  content). Receipt payloads are encrypted separately as described in §6.
+  Full metadata encryption is future work.
 
 ## 2. `tessera.json` — the manifest
 
@@ -261,12 +262,40 @@ Writes are atomic (temp file + rename). Implemented in
 
 ## 6. `receipts/`
 
-One JSON file per finalized receipt, named `<receipt_id>.json`. Each finalized
-receipt embeds its contiguous `seq`, the BLAKE3 hash of the previous finalized
-receipt (`prev_receipt_hash`), and a BLAKE3 hash of its own canonical JSON with
-`self_hash` cleared. This is an internally consistent tamper-evident chain; it
-is not a signature or an external trust anchor. Schema:
-`spec/receipt.schema.json`.
+Format v2 stores one protected binary container per finalized receipt, named
+`<receipt_id>.trc`. The complete logical receipt JSON is encrypted and
+authenticated with XChaCha20-Poly1305 under a receipt-encryption key derived
+from the vault DEK. The logical JSON schema remains
+`spec/receipt.schema.json` for owner review and explicit plaintext export; JSON
+is not the format-v2 at-rest representation.
+
+Each finalized receipt embeds its contiguous `seq`, the keyed BLAKE3 token of
+the previous finalized receipt (`prev_receipt_hash`), and a keyed BLAKE3 token
+over its own canonical JSON with `self_hash` cleared. The authentication key is
+independently derived from the DEK. These tokens authenticate a local chain to
+an unlocked owner. They are not signatures, public verification material,
+non-repudiation, or an external trust anchor.
+
+Domain-separated key derivation contexts are:
+
+- `tessera receipt encryption key v1`
+- `tessera receipt authentication key v1`
+
+Protected-container layout:
+
+```
+offset  size  field
+0       4     magic/version: ASCII "TSR1"
+4       24    XChaCha20-Poly1305 nonce (random per write)
+28      n+16  encrypted logical receipt JSON + Poly1305 tag
+```
+
+AAD is `TSR1`, followed by the receipt-id byte length as a little-endian `u32`,
+followed by the UTF-8 receipt id. A container copied under another receipt id
+therefore fails authentication. Receipt count, file sizes, receipt ids,
+sequence positions, chain tokens, timestamps, and final filenames remain
+visible through directory and SQLite metadata. That residual metadata is part
+of the separately tracked metadata-hardening boundary.
 
 New receipts use `schema_version: 2`. A v2 receipt binds the persisted Guardian
 `session_id`, applicable `pairing_id`, and the complete effective lens-policy
@@ -282,12 +311,20 @@ snapshot plus its BLAKE3 hash. Every disclosed result records:
 - for semantic retrieval, rank, score, and embedding model
   name/version/dimensions.
 
-`tessera receipts verify` recomputes the chain, policy hash, source
+`tessera receipts verify` first decrypts and authenticates every container,
+then recomputes the keyed chain, policy hash, source
 relationships, provenance references, embedding-model binding, and exact
-disclosed-content hashes from the unlocked vault. Receipts without a
-`schema_version` are legacy v1 records: they remain readable and their original
-hash chain remains verifiable, but they cannot be upgraded into exact-disclosure
-evidence because the missing source coordinates were never recorded.
+disclosed-content hashes from the unlocked vault. It distinguishes malformed
+containers, unauthenticated legacy storage, cryptographic authentication
+failure, and a structurally broken internal chain. The command proves only
+owner-keyed local authenticity.
+
+Format-v1 `<receipt_id>.json` files are unauthenticated legacy storage.
+Ordinary list, load, verify, and finalization refuse such a vault. The owner
+must run `tessera receipts migrate --yes`, which verifies the complete legacy
+chain and exact disclosures before protecting any replacement. Logical receipt
+schema v1 records remain readable after migration, but absent source
+coordinates cannot be invented or upgraded into v2 exact-disclosure evidence.
 
 ### Concurrent finalization and crash boundary
 
@@ -297,22 +334,29 @@ head, assign `seq` and `prev_receipt_hash`, and uniquely commit the receipt
 index plus the next head. Agent session activity is never held under that
 write lock.
 
-The portable JSON file uses a recoverable two-phase boundary because SQLite
+The protected container uses a recoverable two-phase boundary because SQLite
 cannot transact a filesystem rename:
 
 1. while holding the finalization transaction, write and `fsync` the complete
-   receipt to `receipts/.<receipt_id>.prepared`;
+   protected container to `receipts/.<receipt_id>.prepared`;
 2. commit the unique index and chain head;
-3. atomically rename the prepared file to `<receipt_id>.json` and `fsync` the
+3. atomically rename the prepared file to `<receipt_id>.trc` and `fsync` the
    receipts directory.
 
-An interruption before step 2 rolls back the database and exposes no JSON
+An interruption before step 2 rolls back the database and exposes no protected
 receipt. An interruption after step 2 leaves a committed index and prepared
 file; the next list, load, verify, or finalization completes the deterministic
 rename before proceeding. A committed index with neither prepared nor final
 file, duplicate id/sequence, inconsistent filename, or disagreement among the
 head, index, and file chain fails closed. Existing pre-0010 file chains are
-backfilled only after the entire chain verifies.
+backfilled only after the entire legacy chain verifies.
+
+Legacy migration prepares every encrypted replacement before a single SQLite
+transaction changes all receipt index rows and the chain head. After that
+commit, deterministic recovery renames prepared containers and deletes their
+legacy JSON counterparts. The manifest advances to format 2 only after the
+protected chain verifies. Restart before the commit leaves the legacy chain
+authoritative; restart after the commit completes the protected transition.
 
 ### HTTP OAuth metadata
 
@@ -347,3 +391,4 @@ removes it from `inbox/`.
 | Version | Date | Changes |
 |---|---|---|
 | 1 | 2026-07-05 | Initial format: manifest with Argon2id/XChaCha20-Poly1305 parameters and embedding model registry; bundle layout reserved. |
+| 2 | 2026-08-20 | Complete receipt payload encryption, owner-keyed chain authentication, explicit crash-safe legacy migration, and `.trc` protected containers. |

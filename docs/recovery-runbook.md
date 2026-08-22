@@ -12,7 +12,7 @@ tessera --vault /path/V.tessera diag --json > integrity-report.json
 ```
 
 The JSON schema identifier is `tessera.integrity-report.v1`. It reports only
-component names, classification, counts, and recovery actions—never content,
+component names, classification, counts, and recovery actions, never content,
 passphrases, keys, decrypted snippets, queries, or secret credentials.
 
 - `ok`: the checked invariant holds.
@@ -57,6 +57,11 @@ The destination must not exist and must be outside the source bundle. Tessera:
 6. renames the completed staging bundle into place;
 7. reopens it with the supplied key and runs the same integrity/receipt checks.
 
+Format-v2 receipt containers are encrypted and owner-authenticated, but they
+still depend on the copied `keyslot.bin` and DEK. Losing every usable keyslot
+loses the receipts as well as the encrypted source evidence. A logical receipt
+export is plaintext and is not a substitute for a restorable vault backup.
+
 The barrier lets an idle Guardian remain running but blocks new writes briefly.
 An active disclosure session fails loudly instead of producing a fuzzy snapshot.
 Never use Finder, `cp -R`, or archive software against a live bundle and assume
@@ -88,6 +93,9 @@ On Linux, the default model root is
 | extract/chunk/embed failure | encrypted original and pending artifact remain; processing error is durable | review error, retry stage or approve derived rebuild |
 | promotion failure | review batch transaction rolls back | correct the blocked item and retry review |
 | receipt finalization crash | prepared file + committed DB index recovery is deterministic | run `diag`/receipt verify; never edit the chain |
+| legacy receipt migration interruption | before the index commit, the verified legacy chain remains authoritative; after commit, restart completes prepared-file renames and legacy deletion | rerun `tessera receipts migrate --yes`, then `tessera receipts verify`; do not mix or hand-edit `.json` and `.trc` files |
+| receipt migration while Guardian is active | migration refuses before writing replacements | close or revoke active Guardian sessions, make an offline bundle copy, then retry |
+| lost last usable keyslot | protected receipts and encrypted sources are unrecoverable | restore a backup with a working keyslot; Tessera cannot regenerate the DEK |
 | disk full/permission failure | operation returns non-zero; completed source blobs are not deleted | restore capacity/permissions, diagnose, retry |
 | missing/tampered original blob | fatal AEAD/content-address failure | restore backup; no fabricated repair exists |
 | missing derived blob/chunk/vector | repairable if originals authenticate | explicit derived rebuild/model reindex |
@@ -96,6 +104,11 @@ On Linux, the default model root is
 | partial bundle copy | open/diag fails loudly on missing manifest, keyslot, DB, or blob | repeat from verified backup |
 | schema migration interruption | each migration is transactional and recorded only after commit | reopen to retry; preserve bundle if migration remains failing |
 | model corruption | pre-load SHA-256 verification fails | verified online/offline reinstall; active index remains |
+
+Receipt verification distinguishes malformed containers, unauthenticated
+legacy storage, cryptographic authentication failure, and internal chain
+breakage. All are owner-action failures; none authorizes automatic evidence
+rewriting.
 
 The recovery tests run on the local macOS gate and the repository Linux CI
 runner. Platform success means the same deterministic fixtures pass on both;

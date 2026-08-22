@@ -100,8 +100,11 @@ errors (`-32700`, `-32600`, `-32601`, and `-32602`) outside the tool envelope.
 
 Guardian does not place protocol output on stdout except JSON-RPC framing and
 does not log passphrases, bearer tokens, raw receipt bodies, or source content.
-Receipt protection remains governed by #39; the current chain must not be
-described as an external signature.
+Receipt payloads are encrypted and their local chain is owner-authenticated
+under vault-derived keys. This is not an external signature, public
+verification mechanism, non-repudiation, or identity attestation. Logical
+receipt exports are plaintext owner-review artifacts and must be protected by
+the exporting consumer.
 
 After a permitted disclosure Tessera cannot control consumer prompts, logs,
 caches, model providers, retention, actions, or deletion. Consumers must keep

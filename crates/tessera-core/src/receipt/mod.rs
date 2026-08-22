@@ -1,15 +1,21 @@
-//! Receipts — versioned, hash-chained records of what an agent accessed.
+//! Receipts — encrypted, owner-authenticated records of agent access.
 //!
 //! A [`Session`] binds a vault + lens and is the ONLY path that produces
 //! disclosed query results: every [`Session::query`] appends a query record
 //! before returning, so no disclosed answer can escape without being recorded
 //! (the enforcement lives here in core, not in any CLI). [`Session::finalize`]
-//! writes `receipts/<id>.json` embedding a BLAKE3 hash of the previous
-//! receipt; [`verify`] walks the chain and fails if any receipt was edited.
+//! writes a protected `receipts/<id>.trc` container and a keyed BLAKE3 link to
+//! the previous receipt. [`verify`] authenticates storage before exposing the
+//! logical receipt and then verifies the chain and exact disclosures.
 
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::artifact::ArtifactId;
 use crate::blob::BlobHash;
@@ -25,6 +31,12 @@ pub enum ReceiptError {
     NotFound(String),
     #[error("receipt chain broken at seq {seq}: {reason}")]
     ChainBroken { seq: u64, reason: String },
+    #[error("malformed receipt {receipt_id}: {reason}")]
+    Malformed { receipt_id: String, reason: String },
+    #[error("legacy receipt storage is unauthenticated ({count} receipt(s)); run `tessera receipts migrate --yes`")]
+    UnauthenticatedLegacy { count: usize },
+    #[error("receipt {receipt_id} failed cryptographic authentication")]
+    CryptographicallyInvalid { receipt_id: String },
     #[error("search error: {0}")]
     Search(#[from] SearchError),
     #[error("disclosure error: {0}")]
@@ -39,7 +51,16 @@ pub enum ReceiptError {
     Database(#[from] rusqlite::Error),
     #[error("receipt finalization interrupted at {0}")]
     FinalizationInterrupted(&'static str),
+    #[error("receipt migration interrupted at {0}")]
+    MigrationInterrupted(&'static str),
+    #[error("receipt migration refused while {count} Guardian session(s) are active")]
+    MigrationActiveSessions { count: usize },
 }
+
+pub const PROTECTED_MAGIC: &[u8; 4] = b"TSR1";
+const PROTECTED_NONCE_LEN: usize = 24;
+const PROTECTED_TAG_LEN: usize = 16;
+const PROTECTED_MIN_LEN: usize = PROTECTED_MAGIC.len() + PROTECTED_NONCE_LEN + PROTECTED_TAG_LEN;
 
 /// The agent a session acts for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,11 +264,11 @@ fn receipts_dir(vault: &Vault) -> std::path::PathBuf {
     vault.path().join("receipts")
 }
 
-/// Canonical content hash: BLAKE3 over the receipt with `self_hash` cleared.
-/// Every other field (including `prev_receipt_hash`) is covered, so editing
-/// any of them changes the hash.
-fn content_hash(receipt: &Receipt) -> Result<String, ReceiptError> {
-    let bytes = if receipt.schema_version == 1 {
+/// Canonical logical receipt bytes with `self_hash` cleared. Legacy schema v1
+/// keeps its historical reduced shape so protected migration does not change
+/// which logical fields its chain token covers.
+fn canonical_content(receipt: &Receipt) -> Result<Vec<u8>, ReceiptError> {
+    if receipt.schema_version == 1 {
         #[derive(Serialize)]
         struct LegacyAccess<'a> {
             artifact_id: &'a str,
@@ -298,7 +319,7 @@ fn content_hash(receipt: &Receipt) -> Result<String, ReceiptError> {
                     .collect(),
             })
             .collect();
-        serde_json::to_vec(&LegacyReceipt {
+        Ok(serde_json::to_vec(&LegacyReceipt {
             receipt_id: &receipt.receipt_id,
             session_id: &receipt.session_id,
             agent: &receipt.agent,
@@ -312,13 +333,28 @@ fn content_hash(receipt: &Receipt) -> Result<String, ReceiptError> {
             seq: receipt.seq,
             prev_receipt_hash: &receipt.prev_receipt_hash,
             self_hash: None,
-        })?
+        })?)
     } else {
         let mut canonical = receipt.clone();
         canonical.self_hash = None;
-        serde_json::to_vec(&canonical)?
-    };
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+        Ok(serde_json::to_vec(&canonical)?)
+    }
+}
+
+/// Historical unkeyed digest used only to validate plaintext legacy receipt
+/// chains before an explicit all-or-nothing migration.
+fn legacy_content_hash(receipt: &Receipt) -> Result<String, ReceiptError> {
+    Ok(blake3::hash(&canonical_content(receipt)?)
+        .to_hex()
+        .to_string())
+}
+
+/// Owner-keyed logical chain token for protected receipt storage.
+fn authenticated_content_hash(vault: &Vault, receipt: &Receipt) -> Result<String, ReceiptError> {
+    let key = vault.dek()?.receipt_authentication_key();
+    Ok(blake3::keyed_hash(&key, &canonical_content(receipt)?)
+        .to_hex()
+        .to_string())
 }
 
 fn compute_summary(queries: &[QueryRecord]) -> ReceiptSummary {
@@ -680,12 +716,110 @@ enum FinalizeFailpoint {
     AfterCommit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationFailpoint {
+    BeforeCommit,
+    AfterCommit,
+    AfterFiles,
+}
+
 fn prepared_path(vault: &Vault, receipt_id: &str) -> std::path::PathBuf {
     receipts_dir(vault).join(format!(".{receipt_id}.prepared"))
 }
 
 fn final_path(vault: &Vault, receipt_id: &str) -> std::path::PathBuf {
+    protected_path(vault, receipt_id)
+}
+
+fn protected_path(vault: &Vault, receipt_id: &str) -> std::path::PathBuf {
+    receipts_dir(vault).join(format!("{receipt_id}.trc"))
+}
+
+fn legacy_path(vault: &Vault, receipt_id: &str) -> std::path::PathBuf {
     receipts_dir(vault).join(format!("{receipt_id}.json"))
+}
+
+fn protected_aad(receipt_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(PROTECTED_MAGIC.len() + 4 + receipt_id.len());
+    aad.extend_from_slice(PROTECTED_MAGIC);
+    aad.extend_from_slice(&(receipt_id.len() as u32).to_le_bytes());
+    aad.extend_from_slice(receipt_id.as_bytes());
+    aad
+}
+
+fn protect_receipt(vault: &Vault, receipt: &Receipt) -> Result<Vec<u8>, ReceiptError> {
+    let plaintext = Zeroizing::new(serde_json::to_vec(receipt)?);
+    let key = vault.dek()?.receipt_encryption_key();
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+    let mut nonce = [0u8; PROTECTED_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let sealed = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext.as_ref(),
+                aad: &protected_aad(&receipt.receipt_id),
+            },
+        )
+        .map_err(|_| ReceiptError::CryptographicallyInvalid {
+            receipt_id: receipt.receipt_id.clone(),
+        })?;
+    let mut container = Vec::with_capacity(PROTECTED_MAGIC.len() + nonce.len() + sealed.len());
+    container.extend_from_slice(PROTECTED_MAGIC);
+    container.extend_from_slice(&nonce);
+    container.extend_from_slice(&sealed);
+    Ok(container)
+}
+
+fn open_protected_receipt(
+    vault: &Vault,
+    receipt_id: &str,
+    container: &[u8],
+) -> Result<Receipt, ReceiptError> {
+    if container.len() < PROTECTED_MIN_LEN {
+        return Err(ReceiptError::Malformed {
+            receipt_id: receipt_id.to_owned(),
+            reason: "protected container is truncated".into(),
+        });
+    }
+    if &container[..PROTECTED_MAGIC.len()] != PROTECTED_MAGIC {
+        return Err(ReceiptError::Malformed {
+            receipt_id: receipt_id.to_owned(),
+            reason: "unsupported or missing protected-container version".into(),
+        });
+    }
+    let nonce_start = PROTECTED_MAGIC.len();
+    let sealed_start = nonce_start + PROTECTED_NONCE_LEN;
+    let key = vault.dek()?.receipt_encryption_key();
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+    let plaintext = cipher
+        .decrypt(
+            XNonce::from_slice(&container[nonce_start..sealed_start]),
+            Payload {
+                msg: &container[sealed_start..],
+                aad: &protected_aad(receipt_id),
+            },
+        )
+        .map(Zeroizing::new)
+        .map_err(|_| ReceiptError::CryptographicallyInvalid {
+            receipt_id: receipt_id.to_owned(),
+        })?;
+    let receipt = serde_json::from_slice::<Receipt>(plaintext.as_ref()).map_err(|error| {
+        ReceiptError::Malformed {
+            receipt_id: receipt_id.to_owned(),
+            reason: format!("authenticated payload is not a logical receipt: {error}"),
+        }
+    })?;
+    if receipt.receipt_id != receipt_id {
+        return Err(ReceiptError::ChainBroken {
+            seq: receipt.seq,
+            reason: format!(
+                "protected payload id {} disagrees with indexed id {receipt_id}",
+                receipt.receipt_id
+            ),
+        });
+    }
+    Ok(receipt)
 }
 
 fn rollback(conn: &rusqlite::Connection) {
@@ -695,6 +829,19 @@ fn rollback(conn: &rusqlite::Connection) {
 fn sync_dir(path: &std::path::Path) -> Result<(), ReceiptError> {
     std::fs::File::open(path)?.sync_all()?;
     Ok(())
+}
+
+fn safe_indexed_filename(receipt_id: &str, file_name: &str) -> bool {
+    valid_receipt_id(receipt_id)
+        && (file_name == format!("{receipt_id}.json") || file_name == format!("{receipt_id}.trc"))
+}
+
+fn valid_receipt_id(receipt_id: &str) -> bool {
+    receipt_id.starts_with("rcpt_")
+        && receipt_id.len() > "rcpt_".len()
+        && receipt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 /// Complete the filesystem half of any receipt whose index/head transaction
@@ -713,15 +860,21 @@ fn recover_committed_files(vault: &Vault) -> Result<(), ReceiptError> {
     drop(stmt);
 
     for (receipt_id, file_name) in indexed {
-        let expected_name = format!("{receipt_id}.json");
-        if file_name != expected_name {
+        if !safe_indexed_filename(&receipt_id, &file_name) {
             return Err(ReceiptError::ChainBroken {
                 seq: 0,
                 reason: format!("unsafe or inconsistent indexed filename for {receipt_id}"),
             });
         }
-        let final_file = dir.join(file_name);
+        let final_file = dir.join(&file_name);
         if final_file.exists() {
+            if final_file.extension().and_then(|value| value.to_str()) == Some("trc") {
+                let legacy = legacy_path(vault, &receipt_id);
+                if legacy.exists() {
+                    std::fs::remove_file(legacy)?;
+                    sync_dir(&dir)?;
+                }
+            }
             continue;
         }
         let prepared = prepared_path(vault, &receipt_id);
@@ -738,6 +891,12 @@ fn recover_committed_files(vault: &Vault) -> Result<(), ReceiptError> {
             // recovery after our existence check.
             if !final_file.exists() {
                 return Err(error.into());
+            }
+        }
+        if file_name.ends_with(".trc") {
+            let legacy = legacy_path(vault, &receipt_id);
+            if legacy.exists() {
+                std::fs::remove_file(legacy)?;
             }
         }
         sync_dir(&dir)?;
@@ -760,11 +919,10 @@ fn verify_chain_records(vault: &Vault, receipts: &[Receipt]) -> Result<(), Recei
                 seq: receipt.seq,
                 reason: "missing self_hash (never finalized)".into(),
             })?;
-        let recomputed = content_hash(receipt)?;
+        let recomputed = authenticated_content_hash(vault, receipt)?;
         if &recomputed != stored {
-            return Err(ReceiptError::ChainBroken {
-                seq: receipt.seq,
-                reason: "content hash mismatch — receipt was edited".into(),
+            return Err(ReceiptError::CryptographicallyInvalid {
+                receipt_id: receipt.receipt_id.clone(),
             });
         }
         let expected_prev = if i == 0 {
@@ -776,6 +934,46 @@ fn verify_chain_records(vault: &Vault, receipts: &[Receipt]) -> Result<(), Recei
             return Err(ReceiptError::ChainBroken {
                 seq: receipt.seq,
                 reason: "prev-hash link does not match the previous receipt".into(),
+            });
+        }
+        verify_disclosures(vault, receipt)?;
+    }
+    Ok(())
+}
+
+fn verify_legacy_chain_records(vault: &Vault, receipts: &[Receipt]) -> Result<(), ReceiptError> {
+    for (index, receipt) in receipts.iter().enumerate() {
+        if receipt.seq != index as u64 {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: format!(
+                    "legacy sequence gap: expected {index}, found {}",
+                    receipt.seq
+                ),
+            });
+        }
+        let stored = receipt
+            .self_hash
+            .as_ref()
+            .ok_or_else(|| ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "legacy receipt is not finalized".into(),
+            })?;
+        if legacy_content_hash(receipt)? != *stored {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "legacy unkeyed content hash mismatch".into(),
+            });
+        }
+        let expected_prev = if index == 0 {
+            None
+        } else {
+            receipts[index - 1].self_hash.clone()
+        };
+        if receipt.prev_receipt_hash != expected_prev {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "legacy predecessor link mismatch".into(),
             });
         }
         verify_disclosures(vault, receipt)?;
@@ -797,8 +995,21 @@ fn ensure_receipt_index(vault: &Vault) -> Result<(), ReceiptError> {
             return Ok(());
         }
 
-        let receipts = load_all_sorted(vault)?;
-        verify_chain_records(vault, &receipts)?;
+        let legacy = load_legacy_all(vault)?;
+        let protected = load_all_sorted(vault)?;
+        if !legacy.is_empty() && !protected.is_empty() {
+            return Err(ReceiptError::ChainBroken {
+                seq: 0,
+                reason: "mixed legacy and protected receipt files without an index".into(),
+            });
+        }
+        let (receipts, extension) = if legacy.is_empty() {
+            verify_chain_records(vault, &protected)?;
+            (protected, "trc")
+        } else {
+            verify_legacy_chain_records(vault, &legacy)?;
+            (legacy, "json")
+        };
         for receipt in &receipts {
             let self_hash =
                 receipt
@@ -817,7 +1028,7 @@ fn ensure_receipt_index(vault: &Vault) -> Result<(), ReceiptError> {
                     receipt.seq as i64,
                     receipt.prev_receipt_hash,
                     self_hash,
-                    format!("{}.json", receipt.receipt_id),
+                    format!("{}.{extension}", receipt.receipt_id),
                     receipt.ended_at.unwrap_or(receipt.started_at).to_rfc3339()
                 ],
             )?;
@@ -841,6 +1052,224 @@ fn ensure_receipt_index(vault: &Vault) -> Result<(), ReceiptError> {
     result
 }
 
+fn legacy_receipt_count(vault: &Vault) -> Result<usize, ReceiptError> {
+    let indexed: i64 = vault.conn().query_row(
+        "SELECT COUNT(*) FROM receipts_index WHERE file_name LIKE '%.json'",
+        [],
+        |row| row.get(0),
+    )?;
+    let files = if receipts_dir(vault).exists() {
+        std::fs::read_dir(receipts_dir(vault))?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            })
+            .count()
+    } else {
+        0
+    };
+    Ok((indexed as usize).max(files))
+}
+
+fn require_protected_storage(vault: &Vault) -> Result<(), ReceiptError> {
+    let count = legacy_receipt_count(vault)?;
+    if count > 0 || vault.manifest().format_version < 2 {
+        return Err(ReceiptError::UnauthenticatedLegacy { count });
+    }
+    Ok(())
+}
+
+/// Convert one complete, valid plaintext receipt chain into protected storage.
+/// The transition is explicit, idempotent, and all-or-nothing at the durable
+/// index/head boundary.
+pub fn migrate_legacy_receipts(vault: &mut Vault) -> Result<usize, ReceiptError> {
+    migrate_legacy_receipts_at(vault, None)
+}
+
+fn migrate_legacy_receipts_at(
+    vault: &mut Vault,
+    failpoint: Option<MigrationFailpoint>,
+) -> Result<usize, ReceiptError> {
+    let active: i64 = vault.conn().query_row(
+        "SELECT COUNT(*) FROM sessions
+         WHERE status = 'active' AND julianday(expires_at) > julianday('now')",
+        [],
+        |row| row.get(0),
+    )?;
+    if active > 0 {
+        return Err(ReceiptError::MigrationActiveSessions {
+            count: active as usize,
+        });
+    }
+    recover_committed_files(vault)?;
+    ensure_receipt_index(vault)?;
+
+    let legacy_count = legacy_receipt_count(vault)?;
+    if legacy_count == 0 {
+        if vault.manifest().format_version < 2 {
+            vault.set_format_version_for_migration(2)?;
+        }
+        if vault
+            .conn()
+            .query_row("SELECT COUNT(*) FROM receipts_index", [], |row| {
+                row.get::<_, i64>(0)
+            })?
+            > 0
+        {
+            verify(vault)?;
+        }
+        return Ok(0);
+    }
+
+    let files = {
+        let mut statement = vault
+            .conn()
+            .prepare("SELECT receipt_id, file_name FROM receipts_index ORDER BY seq")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    if files.len() != legacy_count
+        || files
+            .iter()
+            .any(|(receipt_id, file_name)| file_name != &format!("{receipt_id}.json"))
+    {
+        return Err(ReceiptError::ChainBroken {
+            seq: 0,
+            reason: "legacy migration requires one complete, unmixed indexed JSON chain".into(),
+        });
+    }
+
+    let legacy = load_legacy_all(vault)?;
+    verify_legacy_chain_records(vault, &legacy)?;
+    if legacy.len() != files.len() {
+        return Err(ReceiptError::ChainBroken {
+            seq: legacy.len() as u64,
+            reason: "legacy receipt directory and durable index count disagree".into(),
+        });
+    }
+    for (receipt, (indexed_id, _)) in legacy.iter().zip(&files) {
+        if &receipt.receipt_id != indexed_id {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "legacy receipt order disagrees with durable index".into(),
+            });
+        }
+    }
+
+    let mut protected = legacy.clone();
+    let mut predecessor = None;
+    for receipt in &mut protected {
+        receipt.prev_receipt_hash = predecessor;
+        receipt.self_hash = Some(authenticated_content_hash(vault, receipt)?);
+        predecessor = receipt.self_hash.clone();
+    }
+
+    let dir = receipts_dir(vault);
+    for receipt in &protected {
+        let prepared = prepared_path(vault, &receipt.receipt_id);
+        if prepared.exists() {
+            std::fs::remove_file(&prepared)?;
+        }
+        if protected_path(vault, &receipt.receipt_id).exists() {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: format!(
+                    "protected replacement already exists for legacy receipt {}",
+                    receipt.receipt_id
+                ),
+            });
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&prepared)?;
+        file.write_all(&protect_receipt(vault, receipt)?)?;
+        file.sync_all()?;
+    }
+    sync_dir(&dir)?;
+
+    let conn = vault.conn();
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let transaction_result = (|| -> Result<(), ReceiptError> {
+        let (indexed_count, json_count, next_seq, head_hash): (i64, i64, i64, Option<String>) =
+            conn.query_row(
+                "SELECT
+                (SELECT COUNT(*) FROM receipts_index),
+                (SELECT COUNT(*) FROM receipts_index WHERE file_name LIKE '%.json'),
+                next_seq,
+                head_hash
+             FROM receipt_chain_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let legacy_head = legacy.last().and_then(|receipt| receipt.self_hash.clone());
+        if indexed_count != legacy.len() as i64
+            || json_count != legacy.len() as i64
+            || next_seq != legacy.len() as i64
+            || head_hash != legacy_head
+        {
+            return Err(ReceiptError::ChainBroken {
+                seq: next_seq.max(0) as u64,
+                reason: "legacy chain changed while migration replacements were prepared".into(),
+            });
+        }
+
+        if failpoint == Some(MigrationFailpoint::BeforeCommit) {
+            return Err(ReceiptError::MigrationInterrupted("before commit"));
+        }
+
+        for receipt in &protected {
+            conn.execute(
+                "UPDATE receipts_index
+                 SET prev_receipt_hash = ?1, self_hash = ?2, file_name = ?3
+                 WHERE receipt_id = ?4 AND seq = ?5",
+                rusqlite::params![
+                    receipt.prev_receipt_hash,
+                    receipt.self_hash,
+                    format!("{}.trc", receipt.receipt_id),
+                    receipt.receipt_id,
+                    receipt.seq as i64
+                ],
+            )?;
+        }
+        conn.execute(
+            "UPDATE receipt_chain_state
+             SET head_hash = ?1, updated_at = ?2 WHERE singleton = 1",
+            rusqlite::params![
+                protected
+                    .last()
+                    .and_then(|receipt| receipt.self_hash.as_deref()),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+
+    if let Err(error) = transaction_result {
+        rollback(conn);
+        for receipt in &protected {
+            let _ = std::fs::remove_file(prepared_path(vault, &receipt.receipt_id));
+        }
+        return Err(error);
+    }
+    if failpoint == Some(MigrationFailpoint::AfterCommit) {
+        return Err(ReceiptError::MigrationInterrupted("after commit"));
+    }
+
+    recover_committed_files(vault)?;
+    if failpoint == Some(MigrationFailpoint::AfterFiles) {
+        return Err(ReceiptError::MigrationInterrupted("after files"));
+    }
+    vault.set_format_version_for_migration(2)?;
+    verify(vault)?;
+    Ok(protected.len())
+}
+
 fn finalize_receipt(
     vault: &Vault,
     mut receipt: Receipt,
@@ -848,6 +1277,7 @@ fn finalize_receipt(
 ) -> Result<Receipt, ReceiptError> {
     recover_committed_files(vault)?;
     ensure_receipt_index(vault)?;
+    require_protected_storage(vault)?;
 
     let dir = receipts_dir(vault);
     std::fs::create_dir_all(&dir)?;
@@ -883,13 +1313,13 @@ fn finalize_receipt(
         }
         receipt.seq = next_seq as u64;
         receipt.prev_receipt_hash = head_hash;
-        receipt.self_hash = Some(content_hash(&receipt)?);
+        receipt.self_hash = Some(authenticated_content_hash(vault, &receipt)?);
 
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&prepared)?;
-        file.write_all(&serde_json::to_vec_pretty(&receipt)?)?;
+        file.write_all(&protect_receipt(vault, &receipt)?)?;
         file.sync_all()?;
 
         if failpoint == Some(FinalizeFailpoint::BeforeCommit) {
@@ -912,7 +1342,7 @@ fn finalize_receipt(
                 receipt.seq as i64,
                 receipt.prev_receipt_hash,
                 self_hash,
-                format!("{}.json", receipt.receipt_id),
+                format!("{}.trc", receipt.receipt_id),
                 chrono::Utc::now().to_rfc3339()
             ],
         )?;
@@ -949,13 +1379,70 @@ fn load_all_sorted(vault: &Vault) -> Result<Vec<Receipt>, ReceiptError> {
     let mut receipts = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        if path.extension().and_then(|e| e.to_str()) != Some("trc") {
             continue;
         }
+        let receipt_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| ReceiptError::Malformed {
+                receipt_id: path.display().to_string(),
+                reason: "protected filename is not valid UTF-8".into(),
+            })?;
+        if !valid_receipt_id(receipt_id) {
+            return Err(ReceiptError::Malformed {
+                receipt_id: receipt_id.to_owned(),
+                reason: "protected filename is not a safe receipt id".into(),
+            });
+        }
         let bytes = std::fs::read(&path)?;
-        receipts.push(serde_json::from_slice::<Receipt>(&bytes)?);
+        receipts.push(open_protected_receipt(vault, receipt_id, &bytes)?);
     }
     receipts.sort_by_key(|r| r.seq);
+    Ok(receipts)
+}
+
+fn load_legacy_all(vault: &Vault) -> Result<Vec<Receipt>, ReceiptError> {
+    let dir = receipts_dir(vault);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut receipts = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let receipt_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        if !valid_receipt_id(&receipt_id) {
+            return Err(ReceiptError::Malformed {
+                receipt_id,
+                reason: "legacy filename is not a safe receipt id".into(),
+            });
+        }
+        let receipt =
+            serde_json::from_slice::<Receipt>(&std::fs::read(&path)?).map_err(|error| {
+                ReceiptError::Malformed {
+                    receipt_id: receipt_id.clone(),
+                    reason: format!("legacy JSON is invalid: {error}"),
+                }
+            })?;
+        if receipt.receipt_id != receipt_id {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: format!(
+                    "legacy payload id {} disagrees with filename id {receipt_id}",
+                    receipt.receipt_id
+                ),
+            });
+        }
+        receipts.push(receipt);
+    }
+    receipts.sort_by_key(|receipt| receipt.seq);
     Ok(receipts)
 }
 
@@ -963,26 +1450,34 @@ fn load_all_sorted(vault: &Vault) -> Result<Vec<Receipt>, ReceiptError> {
 pub fn list(vault: &Vault) -> Result<Vec<Receipt>, ReceiptError> {
     recover_committed_files(vault)?;
     ensure_receipt_index(vault)?;
+    require_protected_storage(vault)?;
+    verify(vault)?;
     load_all_sorted(vault)
 }
 
 /// Load one receipt by id.
 pub fn load(vault: &Vault, receipt_id: &str) -> Result<Receipt, ReceiptError> {
+    if !valid_receipt_id(receipt_id) {
+        return Err(ReceiptError::NotFound(receipt_id.to_owned()));
+    }
     recover_committed_files(vault)?;
     ensure_receipt_index(vault)?;
-    let path = receipts_dir(vault).join(format!("{receipt_id}.json"));
+    require_protected_storage(vault)?;
+    verify(vault)?;
+    let path = protected_path(vault, receipt_id);
     if !path.exists() {
         return Err(ReceiptError::NotFound(receipt_id.to_owned()));
     }
-    Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+    open_protected_receipt(vault, receipt_id, &std::fs::read(&path)?)
 }
 
-/// Walk the receipt chain, verifying self-integrity and linkage. Returns the
-/// number of receipts verified; any tamper (edited content, altered hash,
-/// broken link, missing/duplicated sequence) is a [`ReceiptError::ChainBroken`].
+/// Decrypt, authenticate, and verify every finalized receipt. Returns the
+/// number verified and preserves distinct container, authentication, legacy,
+/// and internal-chain failure classes.
 pub fn verify(vault: &Vault) -> Result<usize, ReceiptError> {
     recover_committed_files(vault)?;
     ensure_receipt_index(vault)?;
+    require_protected_storage(vault)?;
     let receipts = load_all_sorted(vault)?;
     verify_chain_records(vault, &receipts)?;
 
@@ -1040,7 +1535,8 @@ pub fn verify(vault: &Vault) -> Result<usize, ReceiptError> {
 }
 
 /// Reconstruct and hash every v2 disclosure from its encrypted backing blob.
-/// v1 receipts remain chain-verifiable but lack enough evidence for this check.
+/// Logical schema-v1 receipts remain chain-verifiable after protected-storage
+/// migration but lack enough evidence for this check.
 pub fn verify_disclosures(vault: &Vault, receipt: &Receipt) -> Result<(), ReceiptError> {
     if receipt.schema_version < 2 {
         return Ok(());
@@ -1416,6 +1912,55 @@ mod tests {
         (dir, vault, lens)
     }
 
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create copy directory");
+        for entry in std::fs::read_dir(from).expect("read copy source") {
+            let entry = entry.expect("copy entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("entry type").is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).expect("copy file");
+            }
+        }
+    }
+
+    fn collect_bundle_bytes(path: &Path, bytes: &mut Vec<u8>) {
+        for entry in std::fs::read_dir(path).expect("read bundle") {
+            let entry = entry.expect("bundle entry");
+            if entry.file_type().expect("bundle entry type").is_dir() {
+                collect_bundle_bytes(&entry.path(), bytes);
+            } else {
+                bytes.extend(std::fs::read(entry.path()).expect("read bundle file"));
+            }
+        }
+    }
+
+    fn downgrade_to_legacy(vault: &mut Vault, mut receipt: Receipt) -> Receipt {
+        std::fs::remove_file(protected_path(vault, &receipt.receipt_id))
+            .expect("remove protected source");
+        receipt.seq = 0;
+        receipt.prev_receipt_hash = None;
+        receipt.self_hash = Some(legacy_content_hash(&receipt).expect("legacy hash"));
+        std::fs::write(
+            legacy_path(vault, &receipt.receipt_id),
+            serde_json::to_vec_pretty(&receipt).expect("legacy json"),
+        )
+        .expect("write legacy");
+        vault
+            .conn()
+            .execute_batch(
+                "DELETE FROM receipts_index;
+                 UPDATE receipt_chain_state
+                 SET next_seq = 0, head_hash = NULL WHERE singleton = 1;",
+            )
+            .expect("clear protected index");
+        vault
+            .set_format_version_for_migration(1)
+            .expect("downgrade fixture");
+        receipt
+    }
+
     fn agent() -> AgentRef {
         AgentRef {
             agent_id: "agent_test".into(),
@@ -1462,9 +2007,7 @@ mod tests {
         );
         assert!(receipt.self_hash.is_some(), "finalize sets self_hash");
         // The receipt file exists on disk.
-        assert!(receipts_dir(&vault)
-            .join(format!("{}.json", receipt.receipt_id))
-            .exists());
+        assert!(protected_path(&vault, &receipt.receipt_id).exists());
     }
 
     #[test]
@@ -1581,7 +2124,7 @@ mod tests {
 
     #[test]
     fn v1_receipt_json_remains_readable() {
-        let (_dir, vault, lens) = recorded_vault();
+        let (_dir, mut vault, lens) = recorded_vault();
         let mut session = Session::open(&vault, agent(), &lens, "legacy", false).expect("open");
         session.query(&FakeEmbedder, "fire", 1).expect("query");
         let receipt = session.finalize().expect("finalize");
@@ -1617,9 +2160,11 @@ mod tests {
             legacy.queries[0].artifacts_accessed[0].access_kind,
             AccessKind::Legacy
         );
-        legacy.self_hash = Some(content_hash(&legacy).expect("legacy canonical hash"));
+        legacy.self_hash = Some(legacy_content_hash(&legacy).expect("legacy canonical hash"));
+        std::fs::remove_file(protected_path(&vault, &legacy.receipt_id))
+            .expect("remove protected fixture");
         std::fs::write(
-            receipts_dir(&vault).join(format!("{}.json", legacy.receipt_id)),
+            legacy_path(&vault, &legacy.receipt_id),
             serde_json::to_vec_pretty(&legacy).expect("legacy json"),
         )
         .expect("write legacy receipt");
@@ -1633,7 +2178,15 @@ mod tests {
                  SET next_seq = 0, head_hash = NULL WHERE singleton = 1;",
             )
             .expect("clear index for legacy backfill");
-        assert_eq!(verify(&vault).expect("v1 chain still verifies"), 1);
+        vault
+            .set_format_version_for_migration(1)
+            .expect("legacy format");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::UnauthenticatedLegacy { count: 1 })
+        ));
+        assert_eq!(migrate_legacy_receipts(&mut vault).expect("migrate"), 1);
+        assert_eq!(verify(&vault).expect("migrated v1 verifies"), 1);
     }
 
     #[test]
@@ -1705,47 +2258,66 @@ mod tests {
         let mut session = Session::open(&vault, agent(), &lens, "tamper", false).expect("open");
         session.query(&FakeEmbedder, "fire", 1).expect("query");
         let receipt = session.finalize().expect("finalize");
-        let path = receipts_dir(&vault).join(format!("{}.json", receipt.receipt_id));
-        let original: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let path = protected_path(&vault, &receipt.receipt_id);
+        let original = std::fs::read(&path).expect("read");
 
-        type Mutation = Box<dyn Fn(&mut serde_json::Value)>;
+        type Mutation = Box<dyn Fn(&mut Receipt)>;
         let mutations: Vec<Mutation> = vec![
-            Box::new(|v| v["session_id"] = "sess_forged".into()),
-            Box::new(|v| v["effective_lens"]["policy"]["name"] = "forged".into()),
-            Box::new(|v| {
-                v["queries"][0]["artifacts_accessed"][0]["disclosed_range"]["end"] = 1.into()
+            Box::new(|receipt| receipt.session_id = "sess_forged".into()),
+            Box::new(|receipt| {
+                receipt.effective_lens.as_mut().expect("lens").policy.name = "forged".into()
             }),
-            Box::new(|v| {
-                v["queries"][0]["artifacts_accessed"][0]["disclosed_content_hash"] =
-                    "0".repeat(64).into()
+            Box::new(|receipt| {
+                receipt.queries[0].artifacts_accessed[0]
+                    .disclosed_range
+                    .as_mut()
+                    .expect("range")
+                    .end = 1
             }),
-            Box::new(|v| v["queries"][0]["artifacts_accessed"][0]["retrieval"]["rank"] = 99.into()),
-            Box::new(|v| v["queries"][0]["artifacts_accessed"][0]["retrieval"]["score"] = 0.into()),
-            Box::new(|v| {
-                v["queries"][0]["artifacts_accessed"][0]["retrieval"]["model"]["version"] =
-                    "forged@9".into()
+            Box::new(|receipt| {
+                receipt.queries[0].artifacts_accessed[0].disclosed_content_hash = "0".repeat(64)
+            }),
+            Box::new(|receipt| {
+                receipt.queries[0].artifacts_accessed[0]
+                    .retrieval
+                    .as_mut()
+                    .expect("retrieval")
+                    .rank = 99
+            }),
+            Box::new(|receipt| {
+                receipt.queries[0].artifacts_accessed[0]
+                    .retrieval
+                    .as_mut()
+                    .expect("retrieval")
+                    .score = 0.0
+            }),
+            Box::new(|receipt| {
+                receipt.queries[0].artifacts_accessed[0]
+                    .retrieval
+                    .as_mut()
+                    .expect("retrieval")
+                    .model
+                    .version = "forged@9".into()
             }),
         ];
 
         for mutate in mutations {
-            let mut tampered = original.clone();
+            let mut tampered = receipt.clone();
             mutate(&mut tampered);
             std::fs::write(
                 &path,
-                serde_json::to_vec_pretty(&tampered).expect("serialize"),
+                protect_receipt(&vault, &tampered).expect("protect tamper"),
             )
             .expect("write tamper");
             assert!(
-                matches!(verify(&vault), Err(ReceiptError::ChainBroken { .. })),
+                matches!(
+                    verify(&vault),
+                    Err(ReceiptError::CryptographicallyInvalid { .. })
+                ),
                 "every bound v2 field is covered by verification"
             );
         }
-        std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&original).expect("serialize"),
-        )
-        .expect("restore");
+        std::fs::write(&path, original).expect("restore");
         assert_eq!(verify(&vault).expect("restored"), 1);
     }
 
@@ -1888,6 +2460,10 @@ mod tests {
             verify(&vault),
             Err(ReceiptError::ChainBroken { .. })
         ));
+        assert!(matches!(
+            load(&vault, "../../outside"),
+            Err(ReceiptError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -1922,15 +2498,17 @@ mod tests {
         // A clean chain verifies.
         assert_eq!(verify(&vault).expect("clean"), 1);
 
-        // Tamper: change the recorded query text in the stored JSON.
-        let path = receipts_dir(&vault).join(format!("{}.json", r1.receipt_id));
-        let text = std::fs::read_to_string(&path).expect("read");
-        let tampered = text.replace("\"first\"", "\"forged-purpose\"");
-        assert_ne!(tampered, text, "tamper actually changed the file");
+        // Tamper with authenticated ciphertext without access to the owner key.
+        let path = protected_path(&vault, &r1.receipt_id);
+        let mut tampered = std::fs::read(&path).expect("read");
+        *tampered.last_mut().expect("tag byte") ^= 0x01;
         std::fs::write(&path, tampered).expect("write");
 
         assert!(
-            matches!(verify(&vault), Err(ReceiptError::ChainBroken { .. })),
+            matches!(
+                verify(&vault),
+                Err(ReceiptError::CryptographicallyInvalid { .. })
+            ),
             "editing a finalized receipt must break verification"
         );
     }
@@ -1955,5 +2533,239 @@ mod tests {
             html.contains(r.self_hash.as_deref().unwrap()),
             "self hash shown"
         );
+    }
+
+    #[test]
+    fn protected_container_hides_receipt_fields_and_round_trips() {
+        let (_dir, vault, lens) = recorded_vault();
+        let purpose = "PROTECTED-PURPOSE-SENTINEL-39";
+        let query = "PROTECTED-QUERY-SENTINEL-39";
+        let mut session = Session::open(&vault, agent(), &lens, purpose, false).expect("open");
+        session.query(&FakeEmbedder, query, 1).expect("query");
+        let mut sentinels = vec![purpose.to_owned(), query.to_owned()];
+        for index in 0..18 {
+            let detail = format!("PROTECTED-RATE-LIMIT-SENTINEL-{index:02}-39");
+            session.record_rate_limit("sentinel-tool", &detail);
+            sentinels.push(detail);
+        }
+        let receipt = session.finalize().expect("finalize");
+
+        let path = protected_path(&vault, &receipt.receipt_id);
+        let stored = std::fs::read(&path).expect("protected receipt");
+        assert!(stored.starts_with(PROTECTED_MAGIC));
+        let mut bundle = Vec::new();
+        collect_bundle_bytes(vault.path(), &mut bundle);
+        for sentinel in &sentinels {
+            assert!(
+                !bundle
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes()),
+                "vault bundle exposed protected receipt field {sentinel}"
+            );
+        }
+        assert!(!legacy_path(&vault, &receipt.receipt_id).exists());
+        assert_eq!(load(&vault, &receipt.receipt_id).expect("load"), receipt);
+        assert_eq!(verify(&vault).expect("verify"), 1);
+    }
+
+    #[test]
+    fn malformed_and_cryptographically_invalid_containers_are_distinct() {
+        let (_dir, vault, lens) = recorded_vault();
+        let receipt = Session::open(&vault, agent(), &lens, "classify", false)
+            .expect("open")
+            .finalize()
+            .expect("finalize");
+        let path = protected_path(&vault, &receipt.receipt_id);
+        let original = std::fs::read(&path).expect("read");
+
+        std::fs::write(&path, PROTECTED_MAGIC).expect("truncate");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::Malformed { .. })
+        ));
+
+        let mut altered = original.clone();
+        *altered.last_mut().expect("tag byte") ^= 0x01;
+        std::fs::write(&path, altered).expect("alter");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::CryptographicallyInvalid { .. })
+        ));
+
+        std::fs::write(&path, original).expect("restore");
+        assert_eq!(verify(&vault).expect("restored"), 1);
+    }
+
+    #[test]
+    fn missing_middle_receipt_and_keyless_plaintext_regeneration_fail() {
+        let (dir, vault, lens) = recorded_vault();
+        let first = Session::open(&vault, agent(), &lens, "first", false)
+            .expect("open first")
+            .finalize()
+            .expect("first");
+        let second = Session::open(&vault, agent(), &lens, "second", false)
+            .expect("open second")
+            .finalize()
+            .expect("second");
+
+        let first_path = protected_path(&vault, &first.receipt_id);
+        let first_bytes = std::fs::read(&first_path).expect("first bytes");
+        std::fs::remove_file(&first_path).expect("delete middle");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::ChainBroken { .. })
+        ));
+        std::fs::write(&first_path, &first_bytes).expect("restore first");
+
+        let injected = receipts_dir(&vault).join("rcpt_injected.trc");
+        std::fs::copy(&first_path, &injected).expect("inject receipt container");
+        assert!(
+            verify(&vault).is_err(),
+            "an inserted container outside the durable chain must fail verification"
+        );
+        std::fs::remove_file(injected).expect("remove injected container");
+
+        let second_path = protected_path(&vault, &second.receipt_id);
+        let second_bytes = std::fs::read(&second_path).expect("second bytes");
+        std::fs::write(&first_path, &second_bytes).expect("swap second into first position");
+        std::fs::write(&second_path, &first_bytes).expect("swap first into second position");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::CryptographicallyInvalid { .. })
+        ));
+        std::fs::write(&first_path, &first_bytes).expect("restore first position");
+        std::fs::write(&second_path, &second_bytes).expect("restore second position");
+
+        let mut forged = second.clone();
+        forged.purpose = "keyless forged chain".into();
+        forged.self_hash = Some(
+            blake3::hash(&serde_json::to_vec(&forged).expect("forged json"))
+                .to_hex()
+                .to_string(),
+        );
+        std::fs::write(
+            &second_path,
+            serde_json::to_vec_pretty(&forged).expect("plaintext forged chain"),
+        )
+        .expect("replace with keyless forgery");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::Malformed { .. })
+                | Err(ReceiptError::CryptographicallyInvalid { .. })
+        ));
+
+        let other =
+            Vault::create(&dir.path().join("Other.tessera"), "other-pass").expect("other vault");
+        std::fs::write(
+            &second_path,
+            protect_receipt(&other, &forged).expect("protect with wrong owner key"),
+        )
+        .expect("replace with wrong-key chain");
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::CryptographicallyInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn explicit_legacy_migration_preserves_logical_receipt_and_is_idempotent() {
+        let (_dir, mut vault, lens) = recorded_vault();
+        let legacy = Session::open(&vault, agent(), &lens, "legacy migration", false)
+            .expect("open")
+            .finalize()
+            .expect("finalize");
+        let legacy = downgrade_to_legacy(&mut vault, legacy);
+
+        assert!(matches!(
+            verify(&vault),
+            Err(ReceiptError::UnauthenticatedLegacy { .. })
+        ));
+        assert_eq!(migrate_legacy_receipts(&mut vault).expect("migrate"), 1);
+        assert_eq!(vault.manifest().format_version, 2);
+        assert!(!legacy_path(&vault, &legacy.receipt_id).exists());
+        assert!(protected_path(&vault, &legacy.receipt_id).exists());
+        let migrated = load(&vault, &legacy.receipt_id).expect("load migrated");
+        assert_eq!(migrated.receipt_id, legacy.receipt_id);
+        assert_eq!(migrated.seq, legacy.seq);
+        assert_eq!(migrated.purpose, legacy.purpose);
+        assert_eq!(migrated.queries, legacy.queries);
+        assert_eq!(verify(&vault).expect("verify migrated"), 1);
+        assert_eq!(migrate_legacy_receipts(&mut vault).expect("idempotent"), 0);
+    }
+
+    #[test]
+    fn interrupted_legacy_migration_recovers_at_every_commit_boundary() {
+        for (failpoint, expected_retry_count) in [
+            (MigrationFailpoint::BeforeCommit, 1),
+            (MigrationFailpoint::AfterCommit, 0),
+            (MigrationFailpoint::AfterFiles, 0),
+        ] {
+            let (_dir, mut vault, lens) = recorded_vault();
+            let receipt = Session::open(&vault, agent(), &lens, "restart-safe migration", false)
+                .expect("open")
+                .finalize()
+                .expect("finalize");
+            let legacy = downgrade_to_legacy(&mut vault, receipt);
+
+            assert!(matches!(
+                migrate_legacy_receipts_at(&mut vault, Some(failpoint)),
+                Err(ReceiptError::MigrationInterrupted(_))
+            ));
+            assert_eq!(
+                migrate_legacy_receipts(&mut vault).expect("restart migration"),
+                expected_retry_count
+            );
+            assert_eq!(vault.manifest().format_version, 2);
+            assert!(!legacy_path(&vault, &legacy.receipt_id).exists());
+            assert!(protected_path(&vault, &legacy.receipt_id).exists());
+            assert_eq!(
+                load(&vault, &legacy.receipt_id)
+                    .expect("load recovered")
+                    .purpose,
+                legacy.purpose
+            );
+            assert_eq!(verify(&vault).expect("verify recovered"), 1);
+        }
+    }
+
+    #[test]
+    fn legacy_migration_refuses_active_guardian_sessions() {
+        let (_dir, mut vault, lens) = recorded_vault();
+        let lens_id = crate::lens::create(&vault, &lens).expect("persist lens");
+        let pairing = crate::pairing::approve(
+            &vault,
+            &lens_id,
+            "migration exclusion",
+            "active guardian",
+            5,
+        )
+        .expect("pairing");
+        crate::session::start(&vault, &pairing).expect("active session");
+
+        assert!(matches!(
+            migrate_legacy_receipts(&mut vault),
+            Err(ReceiptError::MigrationActiveSessions { count: 1 })
+        ));
+    }
+
+    #[test]
+    fn copied_vault_verifies_and_continues_protected_chain() {
+        let (dir, vault, lens) = recorded_vault();
+        Session::open(&vault, agent(), &lens, "before copy", false)
+            .expect("open")
+            .finalize()
+            .expect("finalize");
+        let original = vault.path().to_path_buf();
+        drop(vault);
+
+        let copy = dir.path().join("Copied.tessera");
+        copy_dir(&original, &copy);
+        let copied = Vault::open(&copy, "pass").expect("open copied vault");
+        assert_eq!(verify(&copied).expect("verify copied"), 1);
+        Session::open(&copied, agent(), &lens, "after copy", false)
+            .expect("open copied session")
+            .finalize()
+            .expect("continue chain");
+        assert_eq!(verify(&copied).expect("verify continued"), 2);
     }
 }

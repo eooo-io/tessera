@@ -4,6 +4,7 @@
 //! the bundle: format version, crypto parameters, and the registry of
 //! embedding models used. See `spec/vault-format.md`.
 
+use std::io::Write;
 use std::path::Path;
 use thiserror::Error;
 
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// The bundle format version this build of tessera-core writes and the
 /// highest version it can read.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Error, Debug)]
 pub enum ManifestError {
@@ -97,11 +98,38 @@ impl VaultManifest {
     }
 
     /// Serialize the manifest to a `tessera.json` file (pretty-printed,
-    /// trailing newline).
+    /// trailing newline) through a synced same-directory atomic rename.
     pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
         let mut json = serde_json::to_string_pretty(self)?;
         json.push('\n');
-        std::fs::write(path, json)?;
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest has no parent")
+        })?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "manifest filename is not valid UTF-8",
+                )
+            })?;
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", ulid::Ulid::new()));
+        let result = (|| -> Result<(), std::io::Error> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)?;
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
         Ok(())
     }
 }

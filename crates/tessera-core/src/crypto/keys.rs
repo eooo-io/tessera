@@ -6,6 +6,7 @@
 //! Adding/removing an unlock method touches only this file — never blobs.
 //! Binary layout: `spec/vault-format.md` §4.
 
+use std::io::Write;
 use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -67,6 +68,23 @@ impl Dek {
 
     pub(crate) fn duplicate(&self) -> Self {
         Self { bytes: self.bytes }
+    }
+
+    /// Domain-separated key for protected receipt containers. This key is
+    /// derived on demand, never serialized, and zeroized when dropped.
+    pub(crate) fn receipt_encryption_key(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera receipt encryption key v1",
+            &self.bytes,
+        ))
+    }
+
+    /// Domain-separated key for authenticating the logical receipt chain.
+    pub(crate) fn receipt_authentication_key(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera receipt authentication key v1",
+            &self.bytes,
+        ))
     }
 }
 
@@ -220,9 +238,25 @@ impl KeyslotFile {
             bytes.extend_from_slice(&slot.wrapped_dek);
         }
 
-        let tmp = path.with_extension("bin.tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, path)?;
+        let parent = path.parent().ok_or_else(|| {
+            CryptoError::InvalidFormat("keyslot file has no parent directory".into())
+        })?;
+        let tmp = path.with_extension(format!("bin.tmp.{}", ulid::Ulid::new()));
+        let result = (|| -> Result<(), std::io::Error> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(())
     }
 }
@@ -260,6 +294,24 @@ mod tests {
         let (_f1, d1) = KeyslotFile::create("same", &TEST_PARAMS).expect("create");
         let (_f2, d2) = KeyslotFile::create("same", &TEST_PARAMS).expect("create");
         assert_ne!(d1.as_bytes(), d2.as_bytes());
+    }
+
+    #[test]
+    fn receipt_keys_are_stable_and_domain_separated() {
+        let (_file, dek) = KeyslotFile::create("audit", &TEST_PARAMS).expect("create");
+        assert_eq!(
+            dek.receipt_encryption_key().as_ref(),
+            dek.receipt_encryption_key().as_ref()
+        );
+        assert_eq!(
+            dek.receipt_authentication_key().as_ref(),
+            dek.receipt_authentication_key().as_ref()
+        );
+        assert_ne!(
+            dek.receipt_encryption_key().as_ref(),
+            dek.receipt_authentication_key().as_ref()
+        );
+        assert_ne!(dek.receipt_encryption_key().as_ref(), dek.as_bytes());
     }
 
     #[test]
