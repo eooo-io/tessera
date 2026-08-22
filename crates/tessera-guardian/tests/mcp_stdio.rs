@@ -276,15 +276,18 @@ fn malformed_and_oversized_requests_fail_cleanly_without_killing_stdio_session()
     let mut child = guardian(&path, &pairing.id).spawn().expect("spawn");
     let mut input = child.stdin.take().expect("stdin");
     input.write_all(b"{not-json}\n").expect("malformed");
-    input
-        .write_all(&vec![b'x'; 1024 * 1024 + 1])
-        .expect("oversized body");
-    input.write_all(b"\n").expect("oversized delimiter");
+    let oversized_tool_call = tool_call(
+        999,
+        "vault_query",
+        serde_json::json!({ "query": "x".repeat(1024 * 1024) }),
+    );
+    writeln!(input, "{oversized_tool_call}").expect("oversized tool arguments");
     input
         .write_all(
             b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
               {\"jsonrpc\":\"2.0\",\"method\":\"notifications/unknown\"}\n\
-              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"vault_get_item\",\"arguments\":{\"artifact_id\":42}}}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n",
         )
         .expect("valid continuation");
     drop(input);
@@ -299,7 +302,11 @@ fn malformed_and_oversized_requests_fail_cleanly_without_killing_stdio_session()
         .lines()
         .map(|line| serde_json::from_str(line).expect("json-rpc"))
         .collect();
-    assert_eq!(messages.len(), 4, "two errors and two request responses");
+    assert_eq!(
+        messages.len(),
+        5,
+        "two protocol errors and three request responses"
+    );
     assert_eq!(messages[0]["error"]["code"], -32700);
     assert_eq!(messages[1]["error"]["code"], -32600);
     assert!(messages[1]["error"]["message"]
@@ -308,6 +315,19 @@ fn malformed_and_oversized_requests_fail_cleanly_without_killing_stdio_session()
         .contains("1048576 byte limit"));
     assert_eq!(messages[2]["id"], 1);
     assert_eq!(messages[3]["id"], 2);
+    assert_eq!(messages[3]["result"]["isError"], true);
+    assert_eq!(
+        messages[3]["result"]["structuredContent"]["error"]["code"],
+        "tool_failed"
+    );
+    assert!(
+        messages[3]["result"]["structuredContent"]["error"]["diagnostic"]
+            .as_str()
+            .expect("diagnostic")
+            .contains("artifact_id")
+    );
+    assert_eq!(messages[4]["id"], 3, "session survives malformed arguments");
+    assert!(messages[4]["result"].is_object(), "ping still succeeds");
 }
 
 #[test]

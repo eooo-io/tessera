@@ -401,4 +401,69 @@ mod tests {
         pairing::revoke(&vault, &pairing.id).expect("revoke");
         assert!(validate_token(&vault, &grant.access_token, resource).is_err());
     }
+
+    #[test]
+    fn access_token_expiry_is_bound_to_pairing_ttl_and_enforced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = Vault::create_with_params(&dir.path().join("V.tessera"), "pass", &TEST_PARAMS)
+            .expect("vault");
+        let lens_id = lens::create(
+            &vault,
+            &LensPolicy::new("Remote", vec![SpaceId("space_A".into())]),
+        )
+        .expect("lens");
+        let client = register_client(
+            &vault,
+            "Remote Agent",
+            &["http://127.0.0.1:9911/callback".to_owned()],
+        )
+        .expect("client");
+        let pairing = pairing::approve_remote(
+            &vault,
+            &lens_id,
+            "remote expiry test",
+            "Remote Agent",
+            10,
+            &client.client_id,
+        )
+        .expect("pairing");
+        let resource = "https://tessera.example/mcp";
+        let code = issue_code(
+            &vault,
+            &AuthorizationCodeRequest {
+                client_id: &client.client_id,
+                pairing_id: &pairing.id,
+                redirect_uri: &client.redirect_uris[0],
+                code_challenge: "challenge",
+                resource,
+            },
+        )
+        .expect("code");
+        let grant = exchange_code(
+            &vault,
+            &code,
+            &client.client_id,
+            &client.redirect_uris[0],
+            "challenge",
+            resource,
+        )
+        .expect("exchange");
+        assert_eq!(grant.expires_in, 10 * 60, "pairing TTL drives token TTL");
+        validate_token(&vault, &grant.access_token, resource).expect("fresh token");
+
+        vault
+            .conn()
+            .execute(
+                "UPDATE oauth_access_tokens SET expires_at = ?1 WHERE token_hash = ?2",
+                (
+                    (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                    secret_hash(&grant.access_token),
+                ),
+            )
+            .expect("expire token");
+        assert!(matches!(
+            validate_token(&vault, &grant.access_token, resource),
+            Err(OAuthError::InvalidToken)
+        ));
+    }
 }
