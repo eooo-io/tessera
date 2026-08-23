@@ -63,11 +63,12 @@ successful mutations, or release readiness.
 
 - Compact: 360 to 639 CSS pixels in the packaged app. Navigation uses an explicit modal drawer,
   actions wrap, and content panels stack in workflow order.
-- Medium: 640 to 1023 CSS pixels. Summary grids use two columns where readable;
+- Medium: 640 to 767 CSS pixels. Summary grids use two columns where readable;
   navigation remains compact.
-- Desktop: 1024 to 1535 CSS pixels. Navigation remains visible.
-- Wide: 1536 CSS pixels and above. Preview inbox uses its third information
-  panel.
+- Desktop: 768 to 1023 CSS pixels. Navigation remains compact while content
+  panels gain working room.
+- Wide: 1024 CSS pixels and above. Navigation remains visible and the live
+  aggregate uses a four-card summary row.
 - Coarse pointers receive a 44-pixel target floor.
 - The application honors reduced motion and exposes visible keyboard focus.
 - No viewport may require horizontal page scrolling. Dense preview tables may

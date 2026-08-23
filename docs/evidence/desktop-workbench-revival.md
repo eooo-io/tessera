@@ -132,7 +132,7 @@ vault was opened.
 | Explicit lock | Live projection cleared immediately; empty path and passphrase fields returned; repeated lock remains covered by native and frontend tests |
 | Theme and focus | Light and dark themes rendered; keyboard Tab produced a visible focus ring on the lock control |
 | Preview honesty | Inbox carried a persistent preview warning; every fixture mutation and filter control was disabled; behavior tests visit all eight preview screens |
-| Responsive layout | Drawer/navigation and aggregate layout inspected at 423, 769, 1025, and 1229 pixel captured widths; vertical scrolling appeared where expected and no horizontal page scrollbar was present |
+| Responsive layout | Drawer/navigation and aggregate layout inspected at compact, medium, desktop, and wide native window sizes; retained screenshots are 423, 769, 1025, and 1229 device pixels respectively. The 1024-CSS-pixel wide four-card arrangement activated in the wide smoke, vertical scrolling appeared where expected, and no horizontal page scrollbar was present. |
 | Exit | Application was explicitly locked before the packaged window closed; native state-drop behavior is independently covered by Rust test |
 
 Retained synthetic-only visual evidence:

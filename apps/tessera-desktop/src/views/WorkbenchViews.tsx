@@ -217,7 +217,7 @@ export function OverviewView({
         action={<span className="badge badge-success badge-outline shrink-0 whitespace-nowrap">Live vault aggregate</span>}
       />
 
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-4" aria-label="Live vault summary">
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4" aria-label="Live vault summary">
         <MetricCard label="Pending review" value={String(overview.pendingReviewCount)} detail="Aggregate quarantine count" icon={Database} />
         <MetricCard label="Spaces" value={String(overview.spaceCount)} detail="Aggregate owner space count" icon={Boxes} tone="text-accent" />
         <MetricCard label="Active sessions" value={String(overview.activeSessionCount)} detail="Effective, non-expired sessions" icon={Activity} tone="text-success" />
