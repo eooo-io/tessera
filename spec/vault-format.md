@@ -1,6 +1,6 @@
 # Tessera Vault Bundle Format
 
-**Format version: 2** (see `FORMAT_VERSION` in `tessera-core/src/vault/manifest.rs`)
+**Format version: 3** (see `FORMAT_VERSION` in `tessera-core/src/vault/manifest.rs`)
 
 > **Policy:** this document MUST be updated in the same commit as any code
 > change that affects the on-disk format. A reader implementing from this
@@ -16,7 +16,7 @@ operating systems unchanged.
 ```
 MyVault.tessera/
 ├── tessera.json     # manifest — the portability contract (this doc, §2)
-├── vault.db         # SQLite database, WAL mode (§3)
+├── vault.db         # SQLCipher-protected SQLite database, WAL mode (§3)
 ├── keyslot.bin      # key slots wrapping the DEK (§4)
 ├── blobs/           # content-addressed encrypted blob store (§5)
 ├── receipts/        # protected, owner-authenticated access receipts (§6)
@@ -31,12 +31,14 @@ Invariants that apply to the whole bundle:
   a fully functional vault; nothing is keyed to machine identity. (The macOS
   Keychain may cache the DEK for convenience, but the passphrase path in
   `keyslot.bin` always works.)
-- **I3 — Encrypted at rest:** all user content — originals and derived text,
-  captions, summaries, thumbnails — lives in `blobs/` encrypted. Plaintext
-  content appears only in `inbox/` (pre-ingestion) and, as a documented v1
-  limitation, in `vault.db` *metadata* (filenames, tags, offsets — not
-  content). Receipt payloads are encrypted separately as described in §6.
-  Full metadata encryption is future work.
+- **I3 — Protected at rest:** content lives in authenticated blob containers;
+  metadata, indexes, logical content hashes, receipt indexes, and model
+  registries live in the SQLCipher-protected database. Plaintext content may
+  appear only in the intentional `inbox/` staging boundary and explicit owner
+  exports. Receipt payloads are protected separately as described in §6.
+- **I4 — No public content verifier:** the logical BLAKE3 content hash remains
+  protected metadata. Locked-visible blob paths use a vault-keyed opaque
+  address and cannot be computed from guessed content without the vault DEK.
 
 ## 2. `tessera.json` — the manifest
 
@@ -46,9 +48,11 @@ UTF-8 JSON object, pretty-printed, trailing newline. Written by
 | Field | Type | Meaning |
 |---|---|---|
 | `format_version` | integer ≥ 1 | Bundle format version. Readers MUST refuse to open a bundle whose version is greater than the version they implement. |
-| `created_at` | RFC 3339 timestamp | Vault creation time (UTC). |
 | `crypto` | object | KDF and cipher parameters, see below. |
-| `embedding_models` | array | Registry of embedding models with vectors in this vault. May be empty. |
+
+`created_at`, the embedding-model registry, and preserved private legacy
+extensions are stored in the encrypted `vault_metadata` table. They MUST NOT
+appear in a format-v3 public manifest.
 
 `crypto` object:
 
@@ -60,7 +64,7 @@ UTF-8 JSON object, pretty-printed, trailing newline. Written by
 | `kdf_p_cost` | integer | `4` |
 | `cipher` | string | `"xchacha20poly1305"` |
 
-`embedding_models[]` entry:
+Protected `embedding_models[]` entry:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -68,18 +72,24 @@ UTF-8 JSON object, pretty-printed, trailing newline. Written by
 | `version` | string | Implementation/version identifier. |
 | `dimensions` | integer | Vector dimensionality. Format v1 permits only the repository-pinned `all-MiniLM-L6-v2@onnx-1` 384-dimensional space. A reader that cannot verify and load it MUST fail closed and offer explicit provisioning or reindexing; it MUST NOT silently mix vector spaces. |
 
-**Forward compatibility:** unknown fields — top-level or inside `crypto` —
-MUST be preserved on read-modify-write (implemented via captured extra
-fields). A version-1 reader may open a bundle with version-1 format and
-additional unknown fields; it MUST NOT drop them.
+**Forward compatibility:** legacy unknown top-level and crypto fields move to
+encrypted `vault_metadata.manifest_extensions` during migration. A format-v3
+writer does not echo them into the locked-visible manifest.
 
 ## 3. `vault.db`
 
-SQLite database in WAL mode with foreign keys enforced. Schema is defined by
-ordered migrations in `tessera-core/src/db/migrations/` (never edited once
-shipped — append-only) and recorded in a `schema_migrations` table
-(`version`, `name`, `applied_at`). Readers open with
-`open_database`, which applies pending migrations transactionally.
+SQLCipher 4 database in WAL mode with foreign keys enforced. Every database,
+journal, and WAL page is protected under a raw 256-bit key derived from the
+vault DEK with context `tessera database encryption key v1`. The build uses
+SQLCipher's authenticated page format and forces SQLite temporary storage to
+memory. Schema is defined by ordered append-only migrations in
+`tessera-core/src/db/migrations/` and recorded in `schema_migrations`.
+
+`open_database` installs the key before its first read, proves that an existing
+file is readable, configures the connection, and applies pending migrations
+transactionally. A wrong key, plaintext database, truncated file, or unreadable
+protected database fails closed. An existing invalid file MUST NOT be treated
+as an empty database.
 
 Migration 0001 establishes: `spaces`, `artifacts` (with `sensitivity` and
 the quarantine `state` column — `pending`/`live`/`archived`, CHECK-enforced,
@@ -102,16 +112,15 @@ Migration 0010 adds `receipt_chain_state` (the singleton next-sequence/head)
 and `receipts_index` (unique receipt id and sequence, predecessor/self hashes,
 and final filename). Migration 0011 adds `processing_errors`, a bounded
 per-artifact/stage error history used by owner quarantine review; resolved
-errors remain auditable. Error messages are plaintext metadata and MUST NOT
-contain source content, credentials, or secrets. The database never contains
-plaintext artifact content or receipt JSON.
+errors remain auditable. Error messages MUST NOT contain source content,
+credentials, or secrets even though format v3 protects the database at rest.
+The database never contains plaintext artifact content or receipt JSON.
 
 Migration 0016 adds `transcript_turns`, keyed to an encrypted derived-text
 record. Each row preserves the turn index, exact byte range in normalized
 derived text, and optional source-media start/end milliseconds. Transcript
 content, speaker names, and source cue ids remain in encrypted blobs. Timestamps
-and byte offsets are plaintext metadata and therefore fall under the
-metadata-hardening work tracked separately for v0.1. Chunks over transcript
+and byte offsets are protected database metadata. Chunks over transcript
 derivations pack whole turn ranges and do not split a speaker turn to meet the
 target token count.
 
@@ -122,8 +131,8 @@ fetch time. Intake moves that association transactionally to `web_sources`,
 keyed to the exact artifact version, before removing the staged file. Fetched
 HTML is bounded temporary input and is not retained; extracted Markdown follows
 the normal encrypted-blob pipeline. URLs, titles, dates, fetch times, and
-staging filenames are plaintext metadata subject to the same v1 limitation and
-#50 hardening boundary.
+staging filenames are protected database metadata in format v3. The staged
+Markdown file itself remains intentional inbox plaintext until ingestion.
 
 Migration 0018 adds the conversation provenance graph:
 
@@ -160,10 +169,10 @@ Content-bearing title/project/model/text/code/tool data, attachment filenames,
 the full canonical conversation, and normalized transcript remain encrypted in
 `blobs/`. Stable source ids, source states, attachment preservation/hash,
 timestamps, byte/line coordinates, component versions, and processing metadata
-are plaintext `vault.db` metadata under the unresolved #50 privacy-hardening
-boundary. Agent-facing code may expose content-free citation coordinates only
-after the ordinary artifact lens permits the conversation; reconstructing whole
-source messages is a separate unlocked-owner operation.
+are protected database metadata. Agent-facing code may expose content-free
+citation coordinates only after the ordinary artifact lens permits the
+conversation; reconstructing whole source messages is a separate unlocked-owner
+operation.
 
 The source-neutral conversation object used before persistence is versioned as
 `tessera.conversation.v1` in `spec/conversation-normal-form.schema.json` and
@@ -239,24 +248,25 @@ in `tessera-core/src/crypto/keys.rs`.
 
 ## 5. `blobs/`
 
-Content-addressed store: a blob's identity is the lowercase hex BLAKE3 hash
-of its **plaintext**, stored at `blobs/<first two hex chars>/<full hash>`.
-Contents on disk are XChaCha20-Poly1305-encrypted with the DEK and a unique
-random 24-byte nonce. Identical plaintext is stored once (deduplication).
+The unlocked logical identity is the lowercase BLAKE3 hash of plaintext. It is
+retained inside protected metadata for integrity, provenance, receipts, and
+vault-local deduplication. The locked-visible address is keyed BLAKE3 over the
+logical hash with a key derived using `tessera blob address key v1`, stored at
+`blobs/<first two address chars>/<full opaque address>`. The same content in
+two vaults therefore has different locked-visible addresses.
 
 On-disk container framing:
 
 ```
 offset  size  field
-0       24    XChaCha20-Poly1305 nonce (random, unique per blob write)
-24      n+16  ciphertext + Poly1305 tag
+0       4     magic/version: ASCII "TSB2"
+4       24    XChaCha20-Poly1305 nonce (random, unique per blob write)
+28      n+16  ciphertext + Poly1305 tag
 ```
 
-The AEAD associated data (AAD) is the blob's address (the lowercase hex hash
-string, ASCII bytes). This binds each container to its address: copying a
-valid container to a different address fails authentication. Readers MUST
-verify the AEAD tag and SHOULD additionally recompute the BLAKE3 hash of the
-decrypted plaintext against the address (defense in depth; implemented).
+The AEAD associated data is `TSB2` followed by the complete opaque address.
+This binds each container to its version and keyed path. Readers verify the
+AEAD tag and recompute the protected logical BLAKE3 hash after decrypting.
 Writes are atomic (temp file + rename). Implemented in
 `tessera-core/src/blob/mod.rs`.
 
@@ -292,10 +302,11 @@ offset  size  field
 
 AAD is `TSR1`, followed by the receipt-id byte length as a little-endian `u32`,
 followed by the UTF-8 receipt id. A container copied under another receipt id
-therefore fails authentication. Receipt count, file sizes, receipt ids,
-sequence positions, chain tokens, timestamps, and final filenames remain
-visible through directory and SQLite metadata. That residual metadata is part
-of the separately tracked metadata-hardening boundary.
+therefore fails authentication. Receipt count, container sizes, opaque receipt
+ids in filenames, filesystem timestamps, and access patterns remain visible
+through the directory. Sequence positions, chain tokens, logical timestamps,
+policy, pairings, sessions, and receipt indexes are protected inside SQLCipher
+and the receipt containers.
 
 New receipts use `schema_version: 2`. A v2 receipt binds the persisted Guardian
 `session_id`, applicable `pairing_id`, and the complete effective lens-policy
@@ -354,16 +365,19 @@ backfilled only after the entire legacy chain verifies.
 Legacy migration prepares every encrypted replacement before a single SQLite
 transaction changes all receipt index rows and the chain head. After that
 commit, deterministic recovery renames prepared containers and deletes their
-legacy JSON counterparts. The manifest advances to format 2 only after the
-protected chain verifies. Restart before the commit leaves the legacy chain
-authoritative; restart after the commit completes the protected transition.
+legacy JSON counterparts. Historical format-v1 receipt migration advances the
+receipt representation to format 2 but never downgrades a format-v3 manifest.
+Whole-bundle format-v3 migration performs this receipt transition before
+committing the minimized manifest, so a successful locked vault cannot retain
+plaintext legacy receipts.
 
 ### HTTP OAuth metadata
 
 Migration 0012 adds OAuth public-client registrations, one-time authorization
 codes, and access-token bindings to `vault.db`, plus an optional
 `pairings.oauth_client_id`. Authorization codes and access tokens are stored
-only as BLAKE3 hashes. Each record binds the client, pairing/lens, exact
+only as BLAKE3 hashes inside the protected database. Each record binds the
+client, pairing/lens, exact
 redirect or resource URI, expiry, and revocation/use state. These tables are
 portable authorization metadata, not encrypted content; no source plaintext or
 raw bearer credential is stored in them.
@@ -384,7 +398,38 @@ captured at unlock; this is process coordination metadata, not key material.
 Plaintext staging area. Files here are **not part of the vault's data set**:
 they are unencrypted, unindexed, and invisible to retrieval and lenses.
 Ingestion encrypts an original into `blobs/` **before** any parsing, then
-removes it from `inbox/`.
+removes it from `inbox/`. Same-directory partial copies are owner-only and are
+removed during bounded inbox recovery. Removing a directory entry is not a
+secure-deletion guarantee on snapshots, journaling filesystems, SSDs, or
+provider-retained copies.
+
+## 8. Legacy metadata migration
+
+Ordinary open refuses format-v1/v2 manifests and any bundle containing
+`.metadata-migration-v3`, `.vault.db.v3.prepared`, or
+`.vault.db.v2.retired`. The owner runs:
+
+```bash
+tessera --vault /path/V.tessera metadata migrate --yes
+```
+
+Migration authenticates every legacy blob before writing, syncing, reopening,
+and verifying its TSB2 replacement. It checkpoints the plaintext WAL, exports
+the logical database through `sqlcipher_export`, applies migration 0022, moves
+private manifest fields into `vault_metadata`, compares table row inventories,
+runs full integrity and foreign-key checks, and reopens the candidate with the derived
+key before selection.
+
+The fixed JSON marker contains only `version: 3` and one phase:
+`started`, `blobs_protected`, `database_prepared`, `database_selected`, or
+`manifest_committed`. Selection retains the last plaintext authority at
+`.vault.db.v2.retired` until the protected database and minimized manifest
+validate. Repeating any phase is safe; a missing authoritative source plus an
+invalid replacement fails closed. Final cleanup removes legacy directory
+entries and sidecars but makes no secure-deletion claim.
+
+Migration 0022 adds `vault_metadata(key, value_json, updated_at)`. Its initial
+keys are `created_at`, `embedding_models`, and `manifest_extensions`.
 
 ## Version history
 
@@ -392,3 +437,4 @@ removes it from `inbox/`.
 |---|---|---|
 | 1 | 2026-07-05 | Initial format: manifest with Argon2id/XChaCha20-Poly1305 parameters and embedding model registry; bundle layout reserved. |
 | 2 | 2026-08-20 | Complete receipt payload encryption, owner-keyed chain authentication, explicit crash-safe legacy migration, and `.trc` protected containers. |
+| 3 | 2026-08-23 | SQLCipher-protected metadata and indexes, minimized manifest, keyed opaque blob addressing with TSB2 containers, owner-only permissions, and explicit restart-safe v1/v2 migration. |

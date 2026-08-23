@@ -848,7 +848,7 @@ fn valid_receipt_id(receipt_id: &str) -> bool {
 /// committed before the prepared file could be renamed into place.
 fn recover_committed_files(vault: &Vault) -> Result<(), ReceiptError> {
     let dir = receipts_dir(vault);
-    std::fs::create_dir_all(&dir)?;
+    crate::vault::permissions::directory(&dir)?;
     let mut stmt = vault
         .conn()
         .prepare("SELECT receipt_id, file_name FROM receipts_index ORDER BY seq")?;
@@ -1187,6 +1187,7 @@ fn migrate_legacy_receipts_at(
             .write(true)
             .create_new(true)
             .open(&prepared)?;
+        crate::vault::permissions::file(&prepared)?;
         file.write_all(&protect_receipt(vault, receipt)?)?;
         file.sync_all()?;
     }
@@ -1265,7 +1266,9 @@ fn migrate_legacy_receipts_at(
     if failpoint == Some(MigrationFailpoint::AfterFiles) {
         return Err(ReceiptError::MigrationInterrupted("after files"));
     }
-    vault.set_format_version_for_migration(2)?;
+    if vault.manifest().format_version < 2 {
+        vault.set_format_version_for_migration(2)?;
+    }
     verify(vault)?;
     Ok(protected.len())
 }
@@ -1280,7 +1283,7 @@ fn finalize_receipt(
     require_protected_storage(vault)?;
 
     let dir = receipts_dir(vault);
-    std::fs::create_dir_all(&dir)?;
+    crate::vault::permissions::directory(&dir)?;
     let prepared = prepared_path(vault, &receipt.receipt_id);
     let final_file = final_path(vault, &receipt.receipt_id);
     if prepared.exists() || final_file.exists() {
@@ -1319,6 +1322,7 @@ fn finalize_receipt(
             .write(true)
             .create_new(true)
             .open(&prepared)?;
+        crate::vault::permissions::file(&prepared)?;
         file.write_all(&protect_receipt(vault, &receipt)?)?;
         file.sync_all()?;
 
@@ -1368,6 +1372,28 @@ fn finalize_receipt(
     std::fs::rename(&prepared, &final_file)?;
     sync_dir(&dir)?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+pub(crate) fn downgrade_receipt_fixture(
+    vault: &mut Vault,
+    mut receipt: Receipt,
+) -> Result<(), ReceiptError> {
+    std::fs::remove_file(protected_path(vault, &receipt.receipt_id))?;
+    receipt.seq = 0;
+    receipt.prev_receipt_hash = None;
+    receipt.self_hash = Some(legacy_content_hash(&receipt)?);
+    std::fs::write(
+        legacy_path(vault, &receipt.receipt_id),
+        serde_json::to_vec_pretty(&receipt)?,
+    )?;
+    vault.conn().execute_batch(
+        "DELETE FROM receipts_index;
+         UPDATE receipt_chain_state
+         SET next_seq = 0, head_hash = NULL WHERE singleton = 1;",
+    )?;
+    vault.set_format_version_for_migration(1)?;
+    Ok(())
 }
 
 /// All finalized receipts in the vault, sorted by sequence.

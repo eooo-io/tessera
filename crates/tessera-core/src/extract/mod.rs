@@ -84,8 +84,10 @@ fn run_extractor(extractor: &str, original: &[u8]) -> Result<String, ExtractErro
             }
             // pandoc cannot read docx from stdin reliably; use a temp file.
             let dir = tempfile::TempDir::new()?;
+            crate::vault::permissions::directory(dir.path())?;
             let input = dir.path().join("input.docx");
             std::fs::write(&input, original)?;
+            crate::vault::permissions::file(&input)?;
             let output = std::process::Command::new("pandoc")
                 .arg(&input)
                 .args(["-f", "docx", "-t", "markdown"])

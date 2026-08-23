@@ -102,8 +102,14 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
         IpAddr::V6(address) => format!("[{address}]"),
     };
     let directory = tempfile::tempdir()?;
-    let body_path = directory.path().join("article.html");
+    crate::vault::permissions::directory(directory.path())?;
     let headers_path = directory.path().join("headers.txt");
+    let headers_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&headers_path)?;
+    crate::vault::permissions::file(&headers_path)?;
+    drop(headers_file);
     let output = Command::new("curl")
         .args([
             "--disable",
@@ -129,8 +135,6 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
             &format!("{host}:{port}:{resolved}"),
             "--dump-header",
             headers_path.to_str().expect("temporary UTF-8 path"),
-            "--output",
-            body_path.to_str().expect("temporary UTF-8 path"),
             "--write-out",
             "%{http_code}",
             url.as_str(),
@@ -143,8 +147,11 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
             output.status
         )));
     }
-    let status: u16 = String::from_utf8_lossy(&output.stdout)
-        .trim()
+    if output.stdout.len() < 3 {
+        return Err(WebError::Fetch("curl returned no HTTP status".into()));
+    }
+    let (bytes, status_bytes) = output.stdout.split_at(output.stdout.len() - 3);
+    let status: u16 = String::from_utf8_lossy(status_bytes)
         .parse()
         .map_err(|_| WebError::Fetch("curl returned an invalid HTTP status".into()))?;
     if !(200..300).contains(&status) {
@@ -167,11 +174,10 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
             "response Content-Type is not text/html".into(),
         ));
     }
-    let bytes = std::fs::read(body_path)?;
     if bytes.len() as u64 > MAX_HTML_BYTES {
         return Err(WebError::Fetch("response exceeds 10 MiB limit".into()));
     }
-    let html = String::from_utf8(bytes)
+    let html = String::from_utf8(bytes.to_vec())
         .map_err(|_| WebError::Fetch("response is not UTF-8 HTML".into()))?;
     let article = extract_article(&html, url.as_str())?;
     Ok(FetchedArticle {
@@ -296,6 +302,7 @@ pub fn stage_article(vault: &Vault, fetched: &FetchedArticle) -> Result<PathBuf,
     markdown.push_str(fetched.article.markdown.trim());
     markdown.push('\n');
     std::fs::write(&partial, markdown)?;
+    crate::vault::permissions::file(&partial)?;
     std::fs::File::open(&partial)?.sync_all()?;
     let inserted = vault.conn().execute(
         "INSERT INTO web_staging
@@ -323,6 +330,7 @@ pub fn stage_article(vault: &Vault, fetched: &FetchedArticle) -> Result<PathBuf,
         return Err(error.into());
     }
     std::fs::File::open(&inbox)?.sync_all()?;
+    crate::vault::permissions::file(&target)?;
     Ok(target)
 }
 

@@ -105,6 +105,11 @@ pub enum Command {
         #[command(subcommand)]
         action: KeyCommand,
     },
+    /// Manage protected vault metadata format
+    Metadata {
+        #[command(subcommand)]
+        action: MetadataCommand,
+    },
     /// Run golden-set retrieval evaluation (exits non-zero below gate)
     Eval {
         /// Path to the golden set JSON: [{"question": "...", "expected": ["file.md"]}]
@@ -139,6 +144,16 @@ pub enum Command {
     /// Rebuild only derived text/chunks/summaries from authenticated originals
     RepairDerived {
         /// Confirm artifacts will return to pending and require review/reindex
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MetadataCommand {
+    /// Explicitly migrate a legacy vault to protected format v3
+    Migrate {
+        /// Confirm the persistent-format migration and retired-source cleanup
         #[arg(long)]
         yes: bool,
     },
@@ -1371,6 +1386,29 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
             println!("Vault created at {}", vault.path().display());
             Ok(())
         }
+        Command::Metadata { action } => match action {
+            MetadataCommand::Migrate { yes } => {
+                if !yes {
+                    bail!(
+                        "metadata migration changes the persistent vault format; close Guardian sessions, make an offline bundle copy, and re-run with --yes"
+                    );
+                }
+                let pass = passphrase()?;
+                let report = Vault::migrate_metadata(&vault_path, &pass)
+                    .with_context(|| format!("migrating metadata at {}", vault_path.display()))?;
+                if report.migrated {
+                    println!(
+                        "Metadata migration complete: format v3, {} blob(s) protected, source schema v{}.",
+                        report.converted_blobs, report.source_schema_version
+                    );
+                } else if report.resumed {
+                    println!("Protected metadata migration cleanup completed.");
+                } else {
+                    println!("Vault metadata is already protected at format v3.");
+                }
+                Ok(())
+            }
+        },
         Command::Space { action } => {
             let vault = open_vault(&vault_path)?;
             match action {

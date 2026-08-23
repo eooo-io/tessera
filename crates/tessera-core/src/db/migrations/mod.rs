@@ -57,6 +57,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0021_image_understanding",
         include_str!("0021_image_understanding.sql"),
     ),
+    (
+        "0022_vault_metadata",
+        include_str!("0022_vault_metadata.sql"),
+    ),
 ];
 
 /// Number of migrations this build knows about.
@@ -83,6 +87,18 @@ pub fn schema_version(conn: &Connection) -> Result<u32, DbError> {
 
 /// Run all pending migrations on the given connection.
 pub fn run_migrations(conn: &Connection) -> Result<(), DbError> {
+    run_migrations_through(conn, MIGRATIONS.len())
+}
+
+/// Apply migrations through `target` (inclusive). Used only to construct and
+/// validate legacy-format migration fixtures without rewriting their schema.
+pub(crate) fn run_migrations_through(conn: &Connection, target: usize) -> Result<(), DbError> {
+    if target > MIGRATIONS.len() {
+        return Err(DbError::MigrationFailed(format!(
+            "requested schema version {target} exceeds supported version {}",
+            MIGRATIONS.len()
+        )));
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version    INTEGER PRIMARY KEY,
@@ -92,7 +108,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), DbError> {
     )?;
 
     let applied = schema_version(conn)? as usize;
-    for (index, (name, sql)) in MIGRATIONS.iter().enumerate().skip(applied) {
+    for (index, (name, sql)) in MIGRATIONS.iter().enumerate().take(target).skip(applied) {
         let version = index + 1;
         let tx_result: Result<(), rusqlite::Error> = (|| {
             conn.execute_batch("BEGIN")?;

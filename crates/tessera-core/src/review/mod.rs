@@ -154,7 +154,9 @@ pub fn inspect(
     let artifact = artifact::get(vault, artifact_id)?;
     let (version_id, version, original_blob_hash, original_size_bytes) =
         latest_version(vault, artifact_id)?;
-    let encrypted_original_present = vault.blobs().exists(&BlobHash(original_blob_hash.clone()));
+    let encrypted_original_present = vault
+        .blobs()
+        .exists(vault.dek()?, &BlobHash(original_blob_hash.clone()));
 
     let derived = vault
         .conn()

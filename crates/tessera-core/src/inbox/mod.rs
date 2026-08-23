@@ -97,8 +97,10 @@ fn add_with_copy(
             let _ = std::fs::remove_file(&partial);
             return Err(error.into());
         }
+        crate::vault::permissions::file(&partial)?;
         std::fs::File::open(&partial)?.sync_all()?;
         std::fs::rename(&partial, &target)?;
+        crate::vault::permissions::file(&target)?;
         std::fs::File::open(&inbox)?.sync_all()?;
         staged.push(target);
     }
@@ -107,6 +109,7 @@ fn add_with_copy(
 
 /// Files currently staged in `inbox/`.
 pub fn status(vault: &Vault) -> Result<Vec<PathBuf>, InboxError> {
+    cleanup_abandoned_partials(vault)?;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(inbox_dir(vault))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -121,6 +124,21 @@ pub fn status(vault: &Vault) -> Result<Vec<PathBuf>, InboxError> {
         .collect();
     entries.sort();
     Ok(entries)
+}
+
+fn cleanup_abandoned_partials(vault: &Vault) -> Result<(), std::io::Error> {
+    let inbox = inbox_dir(vault);
+    for entry in std::fs::read_dir(&inbox)? {
+        let path = entry?.path();
+        let abandoned = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.') && name.ends_with(".partial"));
+        if abandoned && path.is_file() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    std::fs::File::open(inbox)?.sync_all()
 }
 
 /// Take in every staged file: hash → dedup → encrypt original → register
@@ -306,7 +324,10 @@ mod tests {
         assert!(status(&vault).expect("status").is_empty());
         let report = process(&vault, &space).expect("process");
         assert!(report.ingested.is_empty());
-        assert!(abandoned.exists(), "crash evidence is not silently deleted");
+        assert!(
+            !abandoned.exists(),
+            "abandoned plaintext is cleaned on recovery"
+        );
     }
 
     #[cfg(unix)]

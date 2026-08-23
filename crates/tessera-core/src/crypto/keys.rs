@@ -70,6 +70,24 @@ impl Dek {
         Self { bytes: self.bytes }
     }
 
+    /// Domain-separated raw key for SQLCipher database page protection.
+    /// Derived on demand, never serialized, and zeroized when dropped.
+    pub(crate) fn database_encryption_key(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera database encryption key v1",
+            &self.bytes,
+        ))
+    }
+
+    /// Domain-separated key for computing vault-specific opaque blob paths.
+    /// Derived on demand, never serialized, and zeroized when dropped.
+    pub(crate) fn blob_address_key(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera blob address key v1",
+            &self.bytes,
+        ))
+    }
+
     /// Domain-separated key for protected receipt containers. This key is
     /// derived on demand, never serialized, and zeroized when dropped.
     pub(crate) fn receipt_encryption_key(&self) -> Zeroizing<[u8; 32]> {
@@ -247,6 +265,7 @@ impl KeyslotFile {
                 .write(true)
                 .create_new(true)
                 .open(&tmp)?;
+            crate::vault::permissions::file(&tmp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)?;
@@ -312,6 +331,29 @@ mod tests {
             dek.receipt_authentication_key().as_ref()
         );
         assert_ne!(dek.receipt_encryption_key().as_ref(), dek.as_bytes());
+    }
+
+    #[test]
+    fn metadata_keys_are_stable_and_domain_separated() {
+        let (_file, dek) = KeyslotFile::create("metadata", &TEST_PARAMS).expect("create");
+        assert_eq!(
+            dek.database_encryption_key().as_ref(),
+            dek.database_encryption_key().as_ref()
+        );
+        assert_eq!(
+            dek.blob_address_key().as_ref(),
+            dek.blob_address_key().as_ref()
+        );
+        assert_ne!(
+            dek.database_encryption_key().as_ref(),
+            dek.blob_address_key().as_ref()
+        );
+        assert_ne!(
+            dek.database_encryption_key().as_ref(),
+            dek.receipt_encryption_key().as_ref()
+        );
+        assert_ne!(dek.database_encryption_key().as_ref(), dek.as_bytes());
+        assert_ne!(dek.blob_address_key().as_ref(), dek.as_bytes());
     }
 
     #[test]

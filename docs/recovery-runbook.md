@@ -40,6 +40,30 @@ does not delete old blob files, rewrite receipts, change source hashes or
 artifact ids, or promote rebuilt items. The owner must run `tessera review` and
 then `tessera model reindex` before restored content can be disclosed again.
 
+## Legacy metadata migration
+
+Make a complete offline bundle copy, stop Guardian writers, and then run:
+
+```bash
+tessera --vault /path/V.tessera metadata migrate --yes
+```
+
+Ordinary open refuses format-v1/v2 and in-progress migration state. Migration
+first checks database integrity and active sessions, then authenticates legacy
+blobs, checkpoints the plaintext WAL, prepares and validates a complete
+SQLCipher export, and retains `.vault.db.v2.retired` until the protected
+database and minimized format-v3 manifest reopen successfully. Rerun the same
+command after interruption. Do not rename or delete `.metadata-migration-v3`,
+`.vault.db.v3.prepared`, or `.vault.db.v2.retired` by hand.
+
+The conversion temporarily requires space for both database representations
+and converted blob containers. A capacity or permission failure retains the
+last validated authority and returns non-zero. Cleanup removes legacy directory
+entries only after commit. Filesystem journals, snapshots, SSD translation
+layers, and provider retention can preserve deleted plaintext; Tessera makes no
+secure-deletion claim. Legacy receipt JSON, when present, is authenticated and
+converted inside the same whole-bundle migration before format v3 commits.
+
 ## Consistent backup
 
 ```bash
@@ -50,10 +74,11 @@ The destination must not exist and must be outside the source bundle. Tessera:
 
 1. diagnoses the source and refuses fatal findings;
 2. refuses while an unexpired Guardian session is active;
-3. takes a dedicated SQLite `BEGIN IMMEDIATE` writer barrier;
+3. takes a dedicated SQLCipher/SQLite `BEGIN IMMEDIATE` writer barrier;
 4. copies the manifest, keyslots, immutable encrypted blobs, finalized receipts,
    and inbox state into a new sibling staging bundle;
-5. uses SQLite online backup for `vault.db` instead of copying WAL/SHM files;
+5. uses the keyed SQLite online backup API for `vault.db` instead of copying
+   WAL/SHM files;
 6. renames the completed staging bundle into place;
 7. reopens it with the supplied key and runs the same integrity/receipt checks.
 
@@ -95,6 +120,9 @@ On Linux, the default model root is
 | receipt finalization crash | prepared file + committed DB index recovery is deterministic | run `diag`/receipt verify; never edit the chain |
 | legacy receipt migration interruption | before the index commit, the verified legacy chain remains authoritative; after commit, restart completes prepared-file renames and legacy deletion | rerun `tessera receipts migrate --yes`, then `tessera receipts verify`; do not mix or hand-edit `.json` and `.trc` files |
 | receipt migration while Guardian is active | migration refuses before writing replacements | close or revoke active Guardian sessions, make an offline bundle copy, then retry |
+| metadata migration interruption | fixed prepared/retired paths and a content-free marker retain one validated authority | rerun `tessera metadata migrate --yes`; do not operate on or hand-edit the bundle |
+| metadata migration capacity/permission failure | the last validated legacy database remains authoritative until the protected replacement validates | restore capacity/permissions and rerun; preserve the offline copy |
+| malformed marker, protected database, or unsupported format | ordinary open and migration fail closed without creating an empty database | preserve the bundle and restore a verified backup or investigate the fixed migration files |
 | lost last usable keyslot | protected receipts and encrypted sources are unrecoverable | restore a backup with a working keyslot; Tessera cannot regenerate the DEK |
 | disk full/permission failure | operation returns non-zero; completed source blobs are not deleted | restore capacity/permissions, diagnose, retry |
 | missing/tampered original blob | fatal AEAD/content-address failure | restore backup; no fabricated repair exists |

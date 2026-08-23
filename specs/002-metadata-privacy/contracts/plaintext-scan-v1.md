@@ -1,0 +1,47 @@
+# Contract: Synthetic Locked-Vault Plaintext Scan
+
+## Fixture
+
+The scanner builds a disposable vault with unique synthetic sentinels for:
+
+- manifest-private fields and model registry;
+- spaces, filenames, titles, tags, sensitivity, and timestamps;
+- source URLs and web staging;
+- projects, repositories, working directories, branches, commits, sessions,
+  source-file identities, and model names;
+- pairings, purposes, agent names, OAuth metadata, and live sessions;
+- processing and ingestion error metadata;
+- receipt index and protected receipt payload fields;
+- conversation archive, node, part, attachment, provenance, and run metadata;
+- original, derived, summary, image, and conversation blob content and hashes;
+- interrupted database, blob, inbox, backup, and temporary-file boundaries.
+
+The fixture MUST NOT read, copy, enumerate, or derive sentinels from an owner
+vault or private corpus.
+
+## Scan
+
+- Close every vault and database handle before the locked scan.
+- Recursively inspect raw file bytes and relative path components.
+- Search exact sentinel bytes, their lowercase and uppercase encodings, public
+  BLAKE3 hashes, and category-specific normalized forms.
+- Inventory every file, directory, size, permission mode where supported, and
+  recognized container class.
+- Permit only intentional inbox plaintext created by the fixture and the exact
+  structural exposure listed in the threat model.
+- Treat any unexpected match as a test failure with a synthetic category and
+  relative path, never with secret material.
+
+## Guessed-content confirmation
+
+For at least 100 deterministic candidate documents, the scanner computes each
+public BLAKE3 hash and every legacy shard path. None may match a path component
+or raw byte sequence in a protected locked bundle. The known-present candidate
+must be indistinguishable from absent candidates without the vault key.
+
+## Output
+
+The report contains aggregate counts, category labels, relative synthetic
+paths, allowed structural classes, and timing. It MUST NOT contain passphrases,
+keys, private content, raw protected rows, bearer tokens, or sensitive receipt
+payloads.

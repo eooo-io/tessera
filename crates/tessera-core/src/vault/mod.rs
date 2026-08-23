@@ -1,10 +1,13 @@
 //! Vault initialization, open, lock/unlock.
 
 pub mod manifest;
+pub(crate) mod metadata;
+pub(crate) mod permissions;
 
 pub use manifest::{
     CryptoParams, EmbeddingModelEntry, ManifestError, VaultManifest, FORMAT_VERSION,
 };
+pub use metadata::{MetadataMigrationError, MetadataMigrationReport};
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +28,8 @@ pub enum VaultError {
     BadPassphrase,
     #[error("vault is locked")]
     Locked,
+    #[error("vault metadata migration is required; run `tessera metadata migrate --yes`")]
+    MetadataMigrationRequired,
     #[error("manifest error: {0}")]
     Manifest(#[from] ManifestError),
     #[error("database error: {0}")]
@@ -71,9 +76,9 @@ impl Vault {
         if path.join("tessera.json").exists() {
             return Err(VaultError::AlreadyExists(path.to_path_buf()));
         }
-        std::fs::create_dir_all(path)?;
+        permissions::directory(path)?;
         for dir in ["receipts", "inbox"] {
-            std::fs::create_dir_all(path.join(dir))?;
+            permissions::directory(&path.join(dir))?;
         }
 
         let (keyslots, dek) = KeyslotFile::create(passphrase, params)?;
@@ -85,7 +90,9 @@ impl Vault {
         manifest.crypto.kdf_p_cost = params.p_cost;
         manifest.save(&path.join("tessera.json"))?;
 
-        let conn = crate::db::open_database(&path.join("vault.db"))?;
+        let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
+        permissions::file(&path.join("vault.db"))?;
+        metadata::initialize_from_manifest(&conn, &manifest)?;
         let blobs = BlobStore::open(&path.join("blobs"))?;
 
         Ok(Self {
@@ -103,12 +110,18 @@ impl Vault {
         if !manifest_path.is_file() {
             return Err(VaultError::NotFound(path.to_path_buf()));
         }
-        let manifest = VaultManifest::load(&manifest_path)?;
+        permissions::validate_bundle_layout(path)?;
+        permissions::harden_tree(path)?;
+        let mut manifest = VaultManifest::load(&manifest_path)?;
+        if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(path) {
+            return Err(VaultError::MetadataMigrationRequired);
+        }
 
         let keyslots = KeyslotFile::load(&path.join("keyslot.bin"))?;
         let dek = keyslots.unlock(passphrase)?;
 
-        let conn = crate::db::open_database(&path.join("vault.db"))?;
+        let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
+        metadata::hydrate_manifest(&conn, &mut manifest)?;
         let blobs = BlobStore::open(&path.join("blobs"))?;
 
         Ok(Self {
@@ -155,8 +168,12 @@ impl Vault {
     /// supports concurrent in-process Guardian requests without retaining or
     /// re-reading the passphrase. Each duplicated DEK zeroizes on drop.
     pub fn reopen_unlocked(&self) -> Result<Self, VaultError> {
-        let manifest = VaultManifest::load(&self.path.join("tessera.json"))?;
-        let conn = crate::db::open_database(&self.path.join("vault.db"))?;
+        let mut manifest = VaultManifest::load(&self.path.join("tessera.json"))?;
+        if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(&self.path) {
+            return Err(VaultError::MetadataMigrationRequired);
+        }
+        let conn = crate::db::open_database(&self.path.join("vault.db"), self.dek()?)?;
+        metadata::hydrate_manifest(&conn, &mut manifest)?;
         let blobs = BlobStore::open(&self.path.join("blobs"))?;
         Ok(Self {
             path: self.path.clone(),
@@ -182,13 +199,38 @@ impl Vault {
         &self.manifest
     }
 
+    /// Embedding models registered inside protected vault metadata.
+    pub fn embedding_models(&self) -> Result<Vec<EmbeddingModelEntry>, VaultError> {
+        Ok(metadata::embedding_models(&self.conn)?)
+    }
+
+    pub(crate) fn register_embedding_model(
+        &self,
+        entry: EmbeddingModelEntry,
+    ) -> Result<(), VaultError> {
+        metadata::register_embedding_model(&self.conn, entry)?;
+        Ok(())
+    }
+
+    /// Explicitly convert a legacy vault to protected metadata format v3.
+    /// Ordinary `open` never performs this persistent-format transition.
+    pub fn migrate_metadata(
+        path: &Path,
+        passphrase: &str,
+    ) -> Result<MetadataMigrationReport, MetadataMigrationError> {
+        metadata::migrate(path, passphrase)
+    }
+
     /// Persist a supported format transition and keep this open handle in
     /// sync. Receipt migration is the sole production caller.
     pub(crate) fn set_format_version_for_migration(
         &mut self,
         version: u32,
     ) -> Result<(), VaultError> {
-        if version == 0 || version > FORMAT_VERSION {
+        if version == 0
+            || version > FORMAT_VERSION
+            || (version < self.manifest.format_version && !cfg!(test))
+        {
             return Err(VaultError::Manifest(ManifestError::UnsupportedVersion {
                 found: version,
                 supported: FORMAT_VERSION,
@@ -255,6 +297,7 @@ mod tests {
         let reopened = Vault::open(&path, "passphrase").expect("open");
         assert!(!reopened.is_locked());
         assert_eq!(reopened.manifest().format_version, FORMAT_VERSION);
+        assert!(reopened.manifest().created_at.is_some());
     }
 
     #[test]
@@ -372,6 +415,20 @@ mod tests {
         vault.lock();
         assert!(vault.is_locked());
         assert!(matches!(vault.dek(), Err(VaultError::Locked)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symbolic_links_inside_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = create_vault(dir.path()).path().to_path_buf();
+        let original = path.join("blobs");
+        let relocated = path.join("real-blobs");
+        std::fs::rename(&original, &relocated).expect("relocate blobs");
+        symlink(&relocated, &original).expect("symlink fixture");
+        assert!(Vault::open(&path, "passphrase").is_err());
     }
 
     fn copy_dir(from: &Path, to: &Path) {

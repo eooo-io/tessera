@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// The bundle format version this build of tessera-core writes and the
 /// highest version it can read.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Error, Debug)]
 pub enum ManifestError {
@@ -52,7 +52,8 @@ pub struct EmbeddingModelEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VaultManifest {
     pub format_version: u32,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub crypto: CryptoParams,
     #[serde(default)]
     pub embedding_models: Vec<EmbeddingModelEntry>,
@@ -67,7 +68,7 @@ impl VaultManifest {
     pub fn new(created_at: chrono::DateTime<chrono::Utc>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            created_at,
+            created_at: Some(created_at),
             crypto: CryptoParams {
                 kdf: "argon2id".to_owned(),
                 kdf_m_cost_kib: 65536,
@@ -100,7 +101,16 @@ impl VaultManifest {
     /// Serialize the manifest to a `tessera.json` file (pretty-printed,
     /// trailing newline) through a synced same-directory atomic rename.
     pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
-        let mut json = serde_json::to_string_pretty(self)?;
+        let mut json = if self.format_version >= 3 {
+            let mut public_crypto = self.crypto.clone();
+            public_crypto.extra.clear();
+            serde_json::to_string_pretty(&serde_json::json!({
+                "format_version": self.format_version,
+                "crypto": public_crypto,
+            }))?
+        } else {
+            serde_json::to_string_pretty(self)?
+        };
         json.push('\n');
         let parent = path.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest has no parent")
@@ -120,6 +130,7 @@ impl VaultManifest {
                 .write(true)
                 .create_new(true)
                 .open(&temporary)?;
+            crate::vault::permissions::file(&temporary)?;
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
             std::fs::rename(&temporary, path)?;
@@ -151,6 +162,7 @@ mod tests {
         assert_eq!(m.crypto.kdf_t_cost, 3);
         assert_eq!(m.crypto.kdf_p_cost, 4);
         assert_eq!(m.crypto.cipher, "xchacha20poly1305");
+        assert_eq!(m.created_at, Some(fixed_now()));
         assert!(m.embedding_models.is_empty());
     }
 
@@ -160,6 +172,7 @@ mod tests {
         let path = dir.path().join("tessera.json");
 
         let mut m = VaultManifest::new(fixed_now());
+        m.format_version = 2;
         m.embedding_models.push(EmbeddingModelEntry {
             name: "all-MiniLM-L6-v2".into(),
             version: "onnx-1".into(),
@@ -169,6 +182,30 @@ mod tests {
 
         let loaded = VaultManifest::load(&path).expect("load");
         assert_eq!(loaded, m);
+    }
+
+    #[test]
+    fn current_manifest_omits_private_creation_and_model_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tessera.json");
+        let mut manifest = VaultManifest::new(fixed_now());
+        manifest.embedding_models.push(EmbeddingModelEntry {
+            name: "PRIVATE-MODEL-SENTINEL".into(),
+            version: "PRIVATE-VERSION-SENTINEL".into(),
+            dimensions: 384,
+        });
+
+        manifest.save(&path).expect("save");
+        let public: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read manifest"))
+                .expect("parse manifest");
+
+        assert_eq!(public["format_version"], FORMAT_VERSION);
+        assert!(public.get("created_at").is_none());
+        assert!(public.get("embedding_models").is_none());
+        assert!(!std::fs::read_to_string(path)
+            .expect("manifest text")
+            .contains("PRIVATE-MODEL-SENTINEL"));
     }
 
     #[test]
