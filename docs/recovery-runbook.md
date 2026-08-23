@@ -79,14 +79,21 @@ The destination must not exist and must be outside the source bundle. Tessera:
    and inbox state into a new sibling staging bundle;
 5. uses the keyed SQLite online backup API for `vault.db` instead of copying
    WAL/SHM files;
-6. reopens the staging bundle with the supplied key and runs the same
-   integrity and receipt checks;
+6. requires the copied keyslot bytes to match the keyslot state that unlocked
+   the source, reopens the staging bundle with that source DEK, and runs the
+   same integrity and receipt checks;
 7. renames the verified staging bundle into place and syncs its parent
    directory.
 
 If copying or destination verification fails, Tessera removes the private
 staging directory and does not publish a destination bundle. Directory-entry
 cleanup is not a secure-deletion guarantee.
+
+Backup refuses a structurally valid keyslot file swapped after source unlock.
+This prevents the library API from reporting success for a destination whose
+copied unlock methods are unrelated to the copied encrypted data. The backup
+still cannot prove that an owner remembers any particular passphrase; restore
+validation with the intended passphrase remains an owner operation.
 
 Format-v2 receipt containers are encrypted and owner-authenticated, but they
 still depend on the copied `keyslot.bin` and DEK. Losing every usable keyslot

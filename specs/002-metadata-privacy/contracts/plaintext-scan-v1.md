@@ -30,8 +30,9 @@ vault or private corpus.
 - Close every vault and database handle before the primary locked scan. A
   separate raw WAL assertion runs while a connection holds encrypted pages.
 - Recursively inspect raw file bytes and relative path components.
-- Search exact sentinel bytes, their lowercase and uppercase encodings, public
-  BLAKE3 hashes, and category-specific normalized forms.
+- Search exact sentinel bytes, lowercase and uppercase forms, public BLAKE3
+  hashes, UTF-16LE and UTF-16BE encodings of each form, and any additional
+  category-specific normalized forms.
 - Inventory every file, directory, non-empty durable-file size, permission mode
   where supported, and recognized container class. Bind interrupted residue to
   the focused blob, receipt, inbox, migration, and backup tests, and bind the

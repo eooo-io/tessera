@@ -21,7 +21,11 @@
 
 ## Database transition
 
-- The source WAL is checkpointed under an exclusive migration boundary.
+- The source WAL is checkpointed before export. Selection then acquires an
+  exclusive SQLite writer boundary, repeats active-session and complete logical
+  inventory validation, and retains that boundary until the legacy authority
+  is retired. A concurrent commit makes the staged candidate stale and causes
+  fail-closed retry rather than data loss.
 - The protected staged database is a complete logical export of the source,
   including schema, triggers, virtual tables, migration ledger, and data.
 - Source and staged inventories, full integrity checks, foreign-key checks, and required
@@ -44,7 +48,8 @@
 
 - Success leaves format v3, no migration marker, no legacy blob containers,
   no plaintext database or sidecars, and a full evidence summary.
-- Failure returns a bounded error class and stable recovery guidance without
+- Failure returns one bounded code from the documented migration error classes
+  and stable recovery guidance without
   echoing metadata, keys, passphrases, content, or unvalidated claims about
   which file is authoritative. The fixed paths and marker are inspected by the
   explicit retry path, which independently validates authority rather than

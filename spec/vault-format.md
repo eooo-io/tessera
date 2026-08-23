@@ -226,6 +226,11 @@ Adding/removing an unlock method touches only this file — never the blobs.
 Removing the final slot is forbidden. Writes are atomic (temp file +
 rename).
 
+An online backup binds the copied `keyslot.bin` byte digest to the keyslot
+state that authenticated the source handle, then validates the copied database
+with the corresponding DEK before publishing the destination. A parseable but
+unrelated keyslot file therefore cannot be reported as a verified backup.
+
 Binary layout (all integers little-endian):
 
 ```

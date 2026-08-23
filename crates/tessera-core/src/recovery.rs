@@ -521,7 +521,8 @@ pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
         destination_db.close().map_err(|(_, error)| error)?;
         std::fs::File::open(staging.join("vault.db"))?.sync_all()?;
         std::fs::File::open(&staging)?.sync_all()?;
-        let verified = Vault::open_with_dek(&staging, vault.dek()?.duplicate())?;
+        let verified =
+            Vault::open_with_dek(&staging, vault.dek()?.duplicate(), vault.keyslot_digest()?)?;
         if diagnose(&verified)?.has_fatal() {
             return Err(RecoveryError::DestinationFatal);
         }
@@ -1010,6 +1011,29 @@ mod tests {
                     .starts_with(&staging_prefix)),
             "failed backup left a staging bundle"
         );
+    }
+
+    #[test]
+    fn backup_refuses_a_structurally_valid_swapped_keyslot_file() {
+        let (dir, vault, _artifact_id) = vault_with_original();
+        let foreign_path = dir.path().join("Foreign.tessera");
+        let foreign = Vault::create_with_params(&foreign_path, "foreign-pass", &TEST_PARAMS)
+            .expect("foreign vault");
+        drop(foreign);
+        std::fs::copy(
+            foreign_path.join("keyslot.bin"),
+            vault.path().join("keyslot.bin"),
+        )
+        .expect("swap structurally valid keyslot");
+        let destination = dir.path().join("MustNotPublish.tessera");
+
+        assert!(matches!(
+            backup(&vault, &destination),
+            Err(RecoveryError::Vault(
+                crate::vault::VaultError::KeyslotBindingMismatch
+            ))
+        ));
+        assert!(!destination.exists());
     }
 
     #[test]

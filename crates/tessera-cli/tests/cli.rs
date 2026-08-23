@@ -66,12 +66,14 @@ fn metadata_migration_requires_confirmation_and_current_format_is_idempotent() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("preserve the bundle and offline copy")
+            predicate::str::contains("metadata migration failed (invalid_state)")
+                .and(predicate::str::contains(
+                    "preserve the bundle and offline copy",
+                ))
                 .and(predicate::str::contains("do not edit migration files"))
                 .and(predicate::str::contains("re-run metadata migrate --yes"))
-                .and(predicate::str::contains(
-                    "metadata migration state is malformed",
-                )),
+                .and(predicate::str::contains("{malformed").not())
+                .and(predicate::str::contains(vault.display().to_string()).not()),
         );
 }
 

@@ -55,6 +55,26 @@ pub enum MetadataMigrationError {
     Receipt(#[from] crate::receipt::ReceiptError),
 }
 
+impl MetadataMigrationError {
+    /// Stable, content-free failure class for user-facing migration output.
+    /// Internal error variants may contain paths, logical hashes, receipt IDs,
+    /// or database details and must never be rendered by the CLI.
+    pub fn safe_code(&self) -> &'static str {
+        match self {
+            Self::InvalidState | Self::Json(_) => "invalid_state",
+            Self::NotLegacy => "not_legacy",
+            Self::ActiveSessions { .. } => "active_sessions",
+            Self::Validation(_) => "validation_failed",
+            Self::Interrupted(_) => "interrupted",
+            Self::Vault(VaultError::BadPassphrase) => "bad_passphrase",
+            Self::Vault(_) => "vault_error",
+            Self::Database(_) | Self::Sql(_) => "database_error",
+            Self::Io(_) => "io_error",
+            Self::Receipt(_) => "receipt_error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MigrationPhase {
@@ -78,6 +98,8 @@ enum MigrationFailpoint {
     AfterBlobs,
     AfterPrepare,
     BeforeExportStorageFull,
+    AfterPrepareConcurrentCommit,
+    DuringExclusiveSelection,
     AfterRetire,
     AfterSelect,
     AfterManifest,
@@ -334,6 +356,7 @@ fn migrate_at(
         None
     };
     let source_version;
+    let legacy_barrier;
     if let Some(selected) = selected {
         if !retired.is_file() {
             return Err(MetadataMigrationError::Validation(
@@ -343,12 +366,17 @@ fn migrate_at(
         validate_database(&selected)?;
         let retained = crate::db::open_plaintext_database(&retired)?;
         validate_database(&retained)?;
+        retained.execute_batch("BEGIN EXCLUSIVE")?;
+        let active = active_sessions(&retained)?;
+        if active > 0 {
+            return Err(MetadataMigrationError::ActiveSessions { count: active });
+        }
         compare_logical_inventory(&retained, &selected)?;
         source_version = crate::db::migrations::schema_version(&retained)?;
         let mut protected_manifest = manifest.clone();
         hydrate_manifest(&selected, &mut protected_manifest)?;
-        drop(retained);
         drop(selected);
+        legacy_barrier = retained;
     } else {
         let source_path = if database.is_file() {
             if retired.exists() {
@@ -375,6 +403,8 @@ fn migrate_at(
             return Err(MetadataMigrationError::ActiveSessions { count: active });
         }
         source.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        let source_data_version: i64 =
+            source.query_row("PRAGMA data_version", [], |row| row.get(0))?;
 
         let prepared_valid = if prepared.is_file() {
             match crate::db::open_encrypted_database(&prepared, &database_key) {
@@ -411,7 +441,41 @@ fn migrate_at(
         if failpoint == MigrationFailpoint::AfterPrepare {
             return Err(MetadataMigrationError::Interrupted("database preparation"));
         }
-        drop(source);
+        if failpoint == MigrationFailpoint::AfterPrepareConcurrentCommit {
+            let competing = rusqlite::Connection::open(&source_path)?;
+            competing.execute("UPDATE spaces SET name = 'concurrent-writer-preserved'", [])?;
+            drop(competing);
+        }
+        // Final selection is guarded by a SQLite exclusive writer boundary.
+        // A writer that committed during export makes the candidate comparison
+        // fail; once this transaction begins, no later writer can commit before
+        // the legacy authority is retired.
+        source.execute_batch("BEGIN EXCLUSIVE")?;
+        let selected_data_version: i64 =
+            source.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        if selected_data_version != source_data_version {
+            return Err(MetadataMigrationError::Validation(
+                "legacy source changed while the protected candidate was prepared".into(),
+            ));
+        }
+        let active = active_sessions(&source)?;
+        if active > 0 {
+            return Err(MetadataMigrationError::ActiveSessions { count: active });
+        }
+        let candidate = crate::db::open_encrypted_database(&prepared, &database_key)?;
+        validate_database(&candidate)?;
+        compare_logical_inventory(&source, &candidate)?;
+        drop(candidate);
+        if failpoint == MigrationFailpoint::DuringExclusiveSelection {
+            let competing = rusqlite::Connection::open(&source_path)?;
+            competing.busy_timeout(std::time::Duration::ZERO)?;
+            if competing.execute_batch("BEGIN IMMEDIATE").is_ok() {
+                let _ = competing.execute_batch("ROLLBACK");
+                return Err(MetadataMigrationError::Validation(
+                    "exclusive migration boundary admitted a competing writer".into(),
+                ));
+            }
+        }
 
         if source_path == database {
             std::fs::rename(&database, &retired)?;
@@ -429,6 +493,7 @@ fn migrate_at(
         let selected = crate::db::open_encrypted_database(&database, &database_key)?;
         validate_database(&selected)?;
         drop(selected);
+        legacy_barrier = source;
     }
 
     save_marker(path, MigrationPhase::DatabaseSelected)?;
@@ -445,6 +510,7 @@ fn migrate_at(
         conn: selected,
         blobs,
         dek: Some(dek),
+        keyslot_digest: std::sync::Mutex::new(super::keyslot_digest_at(&path.join("keyslot.bin"))?),
     };
     crate::receipt::migrate_legacy_receipts(&mut migration_vault)?;
     crate::receipt::verify(&migration_vault)?;
@@ -456,6 +522,8 @@ fn migrate_at(
         return Err(MetadataMigrationError::Interrupted("manifest commit"));
     }
 
+    legacy_barrier.execute_batch("ROLLBACK")?;
+    drop(legacy_barrier);
     remove_database_and_sidecars(&retired)?;
     remove_database_and_sidecars(&prepared)?;
     remove_if_exists(&marker_path)?;
@@ -528,6 +596,7 @@ fn validate_protected_state(
         conn,
         blobs,
         dek: Some(dek.duplicate()),
+        keyslot_digest: std::sync::Mutex::new(super::keyslot_digest_at(&path.join("keyslot.bin"))?),
     };
     let integrity = crate::recovery::diagnose(&candidate).map_err(|_| {
         MetadataMigrationError::Validation(
@@ -579,7 +648,9 @@ fn active_sessions(conn: &Connection) -> Result<usize, MetadataMigrationError> {
     Ok(count as usize)
 }
 
-fn logical_inventory(conn: &Connection) -> Result<BTreeMap<String, i64>, MetadataMigrationError> {
+fn logical_inventory(
+    conn: &Connection,
+) -> Result<BTreeMap<String, (i64, [u8; 32])>, MetadataMigrationError> {
     let mut tables = conn.prepare(
         "SELECT name FROM sqlite_master
          WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -596,7 +667,57 @@ fn logical_inventory(conn: &Connection) -> Result<BTreeMap<String, i64>, Metadat
         let count = conn.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), [], |row| {
             row.get::<_, i64>(0)
         })?;
-        inventory.insert(name, count);
+        let mut column_statement = conn.prepare(&format!("PRAGMA table_info(\"{quoted}\")"))?;
+        let columns = column_statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(column_statement);
+        let projection = columns
+            .iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = conn.prepare(&format!("SELECT {projection} FROM \"{quoted}\""))?;
+        let mut rows = statement.query([])?;
+        let mut row_hashes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut hasher = blake3::Hasher::new();
+            for index in 0..columns.len() {
+                use rusqlite::types::ValueRef;
+                match row.get_ref(index)? {
+                    ValueRef::Null => hasher.update(&[0]),
+                    ValueRef::Integer(value) => {
+                        hasher.update(&[1]);
+                        hasher.update(&value.to_le_bytes())
+                    }
+                    ValueRef::Real(value) => {
+                        hasher.update(&[2]);
+                        hasher.update(&value.to_bits().to_le_bytes())
+                    }
+                    ValueRef::Text(value) => {
+                        hasher.update(&[3]);
+                        hasher.update(&(value.len() as u64).to_le_bytes());
+                        hasher.update(value)
+                    }
+                    ValueRef::Blob(value) => {
+                        hasher.update(&[4]);
+                        hasher.update(&(value.len() as u64).to_le_bytes());
+                        hasher.update(value)
+                    }
+                };
+            }
+            row_hashes.push(*hasher.finalize().as_bytes());
+        }
+        row_hashes.sort_unstable();
+        let mut table_hasher = blake3::Hasher::new();
+        for column in &columns {
+            table_hasher.update(&(column.len() as u64).to_le_bytes());
+            table_hasher.update(column.as_bytes());
+        }
+        for row_hash in row_hashes {
+            table_hasher.update(&row_hash);
+        }
+        inventory.insert(name, (count, *table_hasher.finalize().as_bytes()));
     }
     Ok(inventory)
 }
@@ -607,11 +728,16 @@ fn compare_logical_inventory(
 ) -> Result<(), MetadataMigrationError> {
     let source = logical_inventory(source)?;
     let candidate = logical_inventory(candidate)?;
-    for (table, source_count) in source {
-        if candidate.get(&table) != Some(&source_count) {
-            return Err(MetadataMigrationError::Validation(
-                "protected database inventory differs from legacy source".into(),
-            ));
+    for (table, source_state) in source {
+        // Legacy receipt indexes are deterministically rebuilt and then
+        // authenticated against the protected receipt files before commit.
+        if matches!(table.as_str(), "receipts_index" | "receipt_chain_state") {
+            continue;
+        }
+        if candidate.get(&table) != Some(&source_state) {
+            return Err(MetadataMigrationError::Validation(format!(
+                "protected database inventory differs from legacy source table {table}"
+            )));
         }
     }
     Ok(())
@@ -701,20 +827,45 @@ mod tests {
 
     struct MigrationEmbedder;
 
-    fn assert_locked_value_absent(root: &Path, value: &str) {
-        let variants = [
+    fn locked_scan_variants(value: &str) -> Vec<Vec<u8>> {
+        let text_variants = [
             value.to_owned(),
             value.to_ascii_lowercase(),
             value.to_ascii_uppercase(),
             blake3::hash(value.as_bytes()).to_hex().to_string(),
         ];
-        fn visit(root: &Path, path: &Path, variants: &[String]) {
+        let mut variants = Vec::new();
+        for text in text_variants {
+            variants.push(text.as_bytes().to_vec());
+            variants.push(
+                text.encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            variants.push(
+                text.encode_utf16()
+                    .flat_map(u16::to_be_bytes)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        variants
+    }
+
+    fn assert_locked_value_absent(root: &Path, value: &str) {
+        let path_variants = [
+            value.to_owned(),
+            value.to_ascii_lowercase(),
+            value.to_ascii_uppercase(),
+            blake3::hash(value.as_bytes()).to_hex().to_string(),
+        ];
+        let byte_variants = locked_scan_variants(value);
+        fn visit(root: &Path, path: &Path, path_variants: &[String], byte_variants: &[Vec<u8>]) {
             for entry in std::fs::read_dir(path).expect("read locked bundle") {
                 let entry = entry.expect("bundle entry");
                 let path = entry.path();
                 let relative = path.strip_prefix(root).expect("relative bundle path");
                 let relative_text = relative.to_string_lossy();
-                for variant in variants {
+                for variant in path_variants {
                     assert!(
                         !relative_text.contains(variant),
                         "protected sentinel encoding leaked through path {}",
@@ -722,14 +873,14 @@ mod tests {
                     );
                 }
                 if path.is_dir() {
-                    visit(root, &path, variants);
+                    visit(root, &path, path_variants, byte_variants);
                 } else {
                     let bytes = std::fs::read(&path).expect("read locked file");
-                    for variant in variants {
+                    for variant in byte_variants {
                         assert!(
                             !bytes
                                 .windows(variant.len())
-                                .any(|window| window == variant.as_bytes()),
+                                .any(|window| window == variant.as_slice()),
                             "protected sentinel encoding leaked through bytes in {}",
                             relative.display()
                         );
@@ -737,7 +888,7 @@ mod tests {
                 }
             }
         }
-        visit(root, root, &variants);
+        visit(root, root, &path_variants, &byte_variants);
     }
 
     impl EmbeddingProvider for MigrationEmbedder {
@@ -766,6 +917,23 @@ mod tests {
 
     fn legacy_fixture() -> (tempfile::TempDir, PathBuf, crate::blob::BlobHash) {
         legacy_fixture_at(21)
+    }
+
+    #[test]
+    fn migration_error_codes_never_render_internal_payloads() {
+        let private_value = "PRIVATE-PATH-HASH-RECEIPT-SENTINEL";
+        let validation = MetadataMigrationError::Validation(private_value.into());
+        let io = MetadataMigrationError::Io(std::io::Error::other(private_value));
+        let database =
+            MetadataMigrationError::Database(DbError::MigrationFailed(private_value.into()));
+
+        assert_eq!(validation.safe_code(), "validation_failed");
+        assert_eq!(io.safe_code(), "io_error");
+        assert_eq!(database.safe_code(), "database_error");
+        for code in [validation.safe_code(), io.safe_code(), database.safe_code()] {
+            assert!(!code.contains(private_value));
+            assert!(code.len() <= 32);
+        }
     }
 
     fn legacy_fixture_at(
@@ -1677,6 +1845,54 @@ mod tests {
             );
             assert!(!migration_in_progress(&path));
         }
+    }
+
+    #[test]
+    fn exclusive_selection_boundary_rejects_a_competing_writer() {
+        let (_directory, path, hash) = legacy_fixture();
+        let report = migrate_at(
+            &path,
+            "migration-passphrase",
+            MigrationFailpoint::DuringExclusiveSelection,
+        )
+        .expect("migration with competing writer probe");
+        assert!(report.migrated);
+        let vault = super::super::Vault::open(&path, "migration-passphrase").expect("open");
+        assert_eq!(
+            vault
+                .blobs()
+                .get(vault.dek().expect("dek"), &hash)
+                .expect("blob"),
+            b"MIGRATION-PRIVATE-CONTENT-SENTINEL"
+        );
+    }
+
+    #[test]
+    fn concurrent_commit_after_export_fails_closed_and_is_preserved_on_retry() {
+        let (_directory, path, _hash) = legacy_fixture();
+        assert!(matches!(
+            migrate_at(
+                &path,
+                "migration-passphrase",
+                MigrationFailpoint::AfterPrepareConcurrentCommit,
+            ),
+            Err(MetadataMigrationError::Validation(_))
+        ));
+        assert!(path.join("vault.db").is_file());
+        assert!(!path.join(RETIRED_NAME).exists());
+        let source = crate::db::open_plaintext_database(&path.join("vault.db")).expect("source");
+        let name: String = source
+            .query_row("SELECT name FROM spaces LIMIT 1", [], |row| row.get(0))
+            .expect("concurrent commit remains authoritative");
+        assert_eq!(name, "concurrent-writer-preserved");
+        drop(source);
+
+        migrate(&path, "migration-passphrase").expect("retry from preserved source");
+        let vault = super::super::Vault::open(&path, "migration-passphrase").expect("open");
+        assert_eq!(
+            crate::space::list(&vault).expect("spaces")[0].name,
+            "concurrent-writer-preserved"
+        );
     }
 
     #[test]

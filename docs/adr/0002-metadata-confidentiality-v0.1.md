@@ -205,6 +205,10 @@ finding outside this set reopens the decision and requires owner review.
   logical inventories and one authoritative state.
 - Copy, backup, restore, unlock, query, receipt verification and continuation,
   diagnostics, orphan handling, and repair pass for new and migrated vaults.
+- Final migration inventory comparison and legacy retirement share an
+  exclusive SQLite writer boundary. New-vault creation refuses non-empty or
+  symlinked targets, and backup publication binds copied keyslots to the source
+  unlock state.
 - Storage, migration, query, backup, restore, diagnostic, and repair costs are
   measured and reported with variance.
 - An independent reviewer challenges inventory completeness, confirmation

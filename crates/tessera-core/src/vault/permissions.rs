@@ -2,6 +2,37 @@
 
 use std::path::Path;
 
+/// Prepare an absent or empty real directory for a new vault. Refuse every
+/// pre-seeded entry so creation cannot follow an attacker-provided component.
+pub(crate) fn prepare_new_bundle(path: &Path) -> Result<(), std::io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "new vault target must be a real directory",
+                ));
+            }
+            if std::fs::read_dir(path)?.next().is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "new vault target directory is not empty",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path)?;
+        }
+        Err(error) => return Err(error),
+    }
+    directory(path)
+}
+
+pub(crate) fn create_bundle_directory(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::create_dir(path)?;
+    directory(path)
+}
+
 pub(crate) fn validate_bundle_layout(path: &Path) -> Result<(), std::io::Error> {
     validate_bundle_layout_inner(path, false)
 }

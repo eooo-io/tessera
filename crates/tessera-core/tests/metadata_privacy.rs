@@ -112,24 +112,45 @@ fn assert_documented_locked_path_inventory(root: &Path) {
 }
 
 fn assert_absent_from_locked_bundle(root: &Path, sentinel: &str) {
+    let text_variants = [
+        sentinel.to_owned(),
+        sentinel.to_ascii_lowercase(),
+        sentinel.to_ascii_uppercase(),
+        blake3::hash(sentinel.as_bytes()).to_hex().to_string(),
+    ];
+    let mut byte_variants = Vec::new();
+    for text in &text_variants {
+        byte_variants.push(text.as_bytes().to_vec());
+        byte_variants.push(
+            text.encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        byte_variants.push(
+            text.encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<_>>(),
+        );
+    }
     for file in files_under(root) {
-        assert!(
-            !file
-                .strip_prefix(root)
-                .expect("relative")
-                .to_string_lossy()
-                .contains(sentinel),
-            "sentinel leaked through path {}",
-            file.display()
-        );
+        let relative = file.strip_prefix(root).expect("relative").to_string_lossy();
+        for variant in &text_variants {
+            assert!(
+                !relative.contains(variant),
+                "sentinel encoding leaked through path {}",
+                file.display()
+            );
+        }
         let bytes = std::fs::read(&file).expect("read bundle file");
-        assert!(
-            !bytes
-                .windows(sentinel.len())
-                .any(|window| window == sentinel.as_bytes()),
-            "sentinel leaked through bytes in {}",
-            file.display()
-        );
+        for variant in &byte_variants {
+            assert!(
+                !bytes
+                    .windows(variant.len())
+                    .any(|window| window == variant.as_slice()),
+                "sentinel encoding leaked through bytes in {}",
+                file.display()
+            );
+        }
     }
 }
 

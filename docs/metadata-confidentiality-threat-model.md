@@ -170,7 +170,7 @@ rather than explicitly enforcing owner-only modes on every path.
 | Inbox | Restrictive owner-only mode, atomic staging, bounded stale-partial cleanup | Intentional plaintext staging content and name until ingestion; forensic deletion limits |
 | Web fetch | Bounded body, HTTP status, and content type captured through one in-memory curl stream without a named body or header file | Process memory and pipe data while unlocked; network and endpoint observations |
 | DOCX external-tool input | Decrypted DOCX bytes stream to pandoc over a bounded process pipe; no application-owned named plaintext file | Unlocked same-user/process access to process memory and pipe data while extraction runs |
-| Backup | Keyed destination database and protected file copy | Same structural residuals as source plus backup name and provider history |
+| Backup | Keyed destination database, protected file copy, and copied-keyslot digest binding to the source unlock state before publication | Same structural residuals as source plus backup name and provider history |
 | Migration and atomic residue | Fixed non-sensitive marker, authenticated staged containers, protected prepared database, one validated authoritative source | Fixed migration names; owner-derived inbox/backup temp prefixes; ULIDs in manifest, blob, and receipt temp names; staged/retired existence, sizes, and times; retired plaintext forensic residue after directory-entry removal |
 | Permissions | New directories/files are created owner-only on Unix; opening strips group/other bits while preserving deliberately removed owner bits; best portable effort elsewhere | Same-user processes retain owner authority; filesystem ACL/provider behavior may differ |
 
@@ -178,22 +178,27 @@ rather than explicitly enforcing owner-only modes on every path.
 
 1. A database key is installed before the first database read, including
    backup, diagnostic, migration, and reopened Guardian connections.
-2. Wrong key, plaintext-at-v3-path, malformed page, or unsupported format never
+2. New-vault creation accepts only an absent or empty real directory and
+   refuses pre-seeded component paths before writing bundle data.
+3. Migration repeats logical inventory validation under an exclusive SQLite
+   writer boundary and retains it through legacy retirement.
+4. Wrong key, plaintext-at-v3-path, malformed page, or unsupported format never
    falls through to empty-database creation.
-3. Database, blob-address, TSB2 blob-encryption, receipt-encryption, and
+5. Database, blob-address, TSB2 blob-encryption, receipt-encryption, and
    receipt-authentication keys use distinct derivation domains and are never
    serialized. Direct-DEK blob decryption is confined to the legacy reader.
-4. Public blob paths cannot be computed from candidate content without the
+6. Public blob paths cannot be computed from candidate content without the
    vault key. The same content in different vaults has different paths.
-5. Logical content hashes remain protected and continue to authenticate
+7. Logical content hashes remain protected and continue to authenticate
    decrypted bytes, deduplication, provenance, and receipts.
-6. Migration authenticates and syncs each replacement before retiring its
+8. Migration authenticates and syncs each replacement before retiring its
    source, and ordinary operation refuses an in-progress bundle.
-7. Public manifest fields are a pre-unlock portability allowlist, not a place
+9. Public manifest fields are a pre-unlock portability allowlist, not a place
    for convenient domain metadata.
-8. Synthetic locked-vault scans cover raw bytes and relative paths and fail on
-   any protected sentinel or legacy public hash outside the intentional inbox.
-9. Tessera makes no secure-deletion, unlocked-malware, traffic-analysis,
+10. Synthetic locked-vault scans cover raw bytes and relative paths, including
+    UTF-8 case forms, public hashes, and UTF-16LE/BE encodings, and fail on any
+    protected sentinel or legacy public hash outside the intentional inbox.
+11. Tessera makes no secure-deletion, unlocked-malware, traffic-analysis,
    same-uid isolation, or external rollback-detection claim.
 
 ## Verification topology

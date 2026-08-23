@@ -61,7 +61,21 @@ fn protected_storage_query_backup_and_repair_measurements() {
     let started = Instant::now();
     let vault = Vault::create_with_params(&vault_path, "performance-passphrase", &TEST_PARAMS)
         .expect("create");
-    let create_ms = started.elapsed().as_millis();
+    let mut create_samples_ms = vec![started.elapsed().as_millis()];
+    for index in 0..20 {
+        let sample_path = directory
+            .path()
+            .join(format!("CreateSample{index}.tessera"));
+        let sample_started = Instant::now();
+        let sample =
+            Vault::create_with_params(&sample_path, "performance-passphrase", &TEST_PARAMS)
+                .expect("create sample");
+        create_samples_ms.push(sample_started.elapsed().as_millis());
+        drop(sample);
+    }
+    create_samples_ms.sort_unstable();
+    let create_median_ms = create_samples_ms[create_samples_ms.len() / 2];
+    let create_p95_ms = create_samples_ms[19];
     let space = space::create(&vault, "performance-space", None).expect("space");
 
     let ingest_started = Instant::now();
@@ -89,7 +103,6 @@ fn protected_storage_query_backup_and_repair_measurements() {
 
     let embedder = ControlledEmbedder;
     search::embed_missing(&vault, &embedder).expect("embed");
-    let query_started = Instant::now();
     let results = search::query(
         &vault,
         &embedder,
@@ -97,9 +110,25 @@ fn protected_storage_query_backup_and_repair_measurements() {
         &search::owner_constraints(),
         10,
     )
-    .expect("query");
-    let query_us = query_started.elapsed().as_micros();
+    .expect("warm query");
     assert_eq!(results.len(), 10);
+    let mut query_samples_us = Vec::with_capacity(100);
+    for _ in 0..100 {
+        let query_started = Instant::now();
+        let results = search::query(
+            &vault,
+            &embedder,
+            "deterministic retrieval fixture",
+            &search::owner_constraints(),
+            10,
+        )
+        .expect("query sample");
+        query_samples_us.push(query_started.elapsed().as_micros());
+        assert_eq!(results.len(), 10);
+    }
+    query_samples_us.sort_unstable();
+    let query_median_us = query_samples_us[query_samples_us.len() / 2];
+    let query_p95_us = query_samples_us[94];
 
     let diagnostics_started = Instant::now();
     let report = recovery::diagnose(&vault).expect("diagnose");
@@ -129,8 +158,10 @@ fn protected_storage_query_backup_and_repair_measurements() {
     let backup_bytes = tree_bytes(&backup_path);
 
     println!(
-        "metadata_performance_v1 create_ms={create_ms} ingest_100_ms={ingest_ms} \
-         query_top10_us={query_us} diagnostics_ms={diagnostics_ms} repair_ms={repair_ms} \
+        "metadata_performance_v1 create_median_ms={create_median_ms} \
+         create_p95_ms={create_p95_ms} ingest_100_ms={ingest_ms} \
+         query_top10_median_us={query_median_us} query_top10_p95_us={query_p95_us} \
+         diagnostics_ms={diagnostics_ms} repair_ms={repair_ms} \
          backup_ms={backup_ms} restore_ms={restore_ms} storage_bytes={storage_bytes} \
          backup_bytes={backup_bytes}"
     );
