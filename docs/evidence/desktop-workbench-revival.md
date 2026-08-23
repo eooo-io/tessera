@@ -99,9 +99,9 @@ system, filesystem, SSD, snapshot, or backup layers.
 The first independent review round was bound to candidate `eff113a1f5163f3d9909ca13e89573df5053cbe6` and deliberately did not pass. It identified an overbroad `core:default` capability, development loopback origins in the production CSP, a falsely reassuring UI state after native lock failure, incomplete drawer keyboard semantics, incomplete lifecycle focus and announcement behavior, and insufficiently durable responsive evidence. The corrected candidate removes the optional capability grants, splits development and production CSP, enters a restart-required state after unconfirmed lock, traps and restores drawer focus with Escape support, focuses and announces lifecycle transitions, exercises all eight preview screens, and retains synthetic-only screenshots. Final independent review is required against the exact corrected commit.
 
 The final controlled ignored-performance run recorded: 10,000-artifact listing
-within its 100 ms budget; 18.97 ms per embedding chunk; 674 ms legacy
-migration; 1.16 ms median top-10 query; 26 ms diagnostics; 166 ms repair;
-888 ms backup; and 108 ms restore. These are development-machine measurements,
+within its 100 ms budget; 19.17 ms per embedding chunk; 717 ms legacy
+migration; 1.18 ms median top-10 query; 26 ms diagnostics; 173 ms repair;
+987 ms backup; and 109 ms restore. These are development-machine measurements,
 not cross-platform service level guarantees.
 
 A deliberately parallel validation attempt materially distorted two budgets
@@ -132,7 +132,7 @@ vault was opened.
 | Explicit lock | Live projection cleared immediately; empty path and passphrase fields returned; repeated lock remains covered by native and frontend tests |
 | Theme and focus | Light and dark themes rendered; keyboard Tab produced a visible focus ring on the lock control |
 | Preview honesty | Inbox carried a persistent preview warning; every fixture mutation and filter control was disabled; behavior tests visit all eight preview screens |
-| Responsive layout | Drawer/navigation and aggregate layout inspected at compact, medium, desktop, and wide native window sizes; retained screenshots are 423, 769, 1025, and 1229 device pixels respectively. The 1024-CSS-pixel wide four-card arrangement activated in the wide smoke, vertical scrolling appeared where expected, and no horizontal page scrollbar was present. |
+| Responsive layout | Drawer/navigation and aggregate layout inspected at compact, medium, desktop, and wide native window sizes. Retained captures show stacked compact content, two-column medium/desktop content, and the activated 1024-CSS-pixel wide four-card arrangement; vertical scrolling appeared where expected and no horizontal page scrollbar was present. Screenshot bitmap dimensions reflect macOS display scaling and are not presented as CSS viewport measurements. |
 | Exit | Application was explicitly locked before the packaged window closed; native state-drop behavior is independently covered by Rust test |
 
 Retained synthetic-only visual evidence:
