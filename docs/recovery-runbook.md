@@ -75,6 +75,8 @@ The destination must not exist and must be outside the source bundle. Tessera:
 1. diagnoses the source and refuses fatal findings;
 2. refuses while an unexpired Guardian session is active;
 3. takes a dedicated SQLCipher/SQLite `BEGIN IMMEDIATE` writer barrier;
+   then repeats the active-session check under that barrier so a session that
+   raced the initial diagnostics cannot enter the snapshot;
 4. copies the manifest, keyslots, immutable encrypted blobs, finalized receipts,
    and inbox state into a new sibling staging bundle;
 5. uses the keyed SQLite online backup API for `vault.db` instead of copying
@@ -94,6 +96,9 @@ This prevents the library API from reporting success for a destination whose
 copied unlock methods are unrelated to the copied encrypted data. The backup
 still cannot prove that an owner remembers any particular passphrase; restore
 validation with the intended passphrase remains an owner operation.
+Keyslot add/remove operations also require the exact parsed keyslot bytes to
+match the state that unlocked the in-memory DEK before adopting a new digest;
+mutation cannot launder a foreign keyslot file into a later backup.
 
 Format-v2 receipt containers are encrypted and owner-authenticated, but they
 still depend on the copied `keyslot.bin` and DEK. Losing every usable keyslot

@@ -79,7 +79,9 @@ fn protected_storage_query_backup_and_repair_measurements() {
     let space = space::create(&vault, "performance-space", None).expect("space");
 
     let ingest_started = Instant::now();
+    let mut ingest_samples_us = Vec::with_capacity(100);
     for index in 0..100 {
+        let item_started = Instant::now();
         let body = format!(
             "Protected metadata performance document {index}. Deterministic retrieval fixture."
         );
@@ -98,8 +100,12 @@ fn protected_storage_query_backup_and_repair_measurements() {
         chunk::chunk_derived_text(&vault, &derived, &ChunkParams::default()).expect("chunk");
         artifact::set_state(&vault, &artifact_id, artifact::ArtifactState::Live)
             .expect("make live");
+        ingest_samples_us.push(item_started.elapsed().as_micros());
     }
     let ingest_ms = ingest_started.elapsed().as_millis();
+    ingest_samples_us.sort_unstable();
+    let ingest_median_us = ingest_samples_us[ingest_samples_us.len() / 2];
+    let ingest_p95_us = ingest_samples_us[94];
 
     let embedder = ControlledEmbedder;
     search::embed_missing(&vault, &embedder).expect("embed");
@@ -160,6 +166,7 @@ fn protected_storage_query_backup_and_repair_measurements() {
     println!(
         "metadata_performance_v1 create_median_ms={create_median_ms} \
          create_p95_ms={create_p95_ms} ingest_100_ms={ingest_ms} \
+         ingest_item_median_us={ingest_median_us} ingest_item_p95_us={ingest_p95_us} \
          query_top10_median_us={query_median_us} query_top10_p95_us={query_p95_us} \
          diagnostics_ms={diagnostics_ms} repair_ms={repair_ms} \
          backup_ms={backup_ms} restore_ms={restore_ms} storage_bytes={storage_bytes} \

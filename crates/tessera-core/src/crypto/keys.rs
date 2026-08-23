@@ -218,6 +218,19 @@ impl KeyslotFile {
     /// Parse `keyslot.bin`.
     pub fn load(path: &Path) -> Result<Self, CryptoError> {
         let bytes = std::fs::read(path)?;
+        Self::parse(&bytes)
+    }
+
+    /// Parse `keyslot.bin` and return a digest of the exact bytes parsed. This
+    /// lets an unlocked vault bind later keyslot mutations to the file that
+    /// actually authenticated its in-memory DEK without a read/parse race.
+    pub(crate) fn load_bound(path: &Path) -> Result<(Self, [u8; 32]), CryptoError> {
+        let bytes = std::fs::read(path)?;
+        let digest = *blake3::hash(&bytes).as_bytes();
+        Ok((Self::parse(&bytes)?, digest))
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() < 5 || &bytes[0..4] != MAGIC {
             return Err(CryptoError::InvalidFormat("bad magic".into()));
         }
@@ -250,6 +263,13 @@ impl KeyslotFile {
 
     /// Write `keyslot.bin` (atomic: temp file + rename).
     pub fn save(&self, path: &Path) -> Result<(), CryptoError> {
+        self.save_bound(path).map(|_| ())
+    }
+
+    /// Write and return the digest of the exact bytes published. Callers that
+    /// already trust this parsed keyslot state can update an in-memory binding
+    /// without re-reading an attacker-replaceable path after rename.
+    pub(crate) fn save_bound(&self, path: &Path) -> Result<[u8; 32], CryptoError> {
         if self.slots.len() > u8::MAX as usize {
             return Err(CryptoError::InvalidFormat("too many keyslots".into()));
         }
@@ -264,6 +284,7 @@ impl KeyslotFile {
             bytes.extend_from_slice(&slot.nonce);
             bytes.extend_from_slice(&slot.wrapped_dek);
         }
+        let digest = *blake3::hash(&bytes).as_bytes();
 
         let parent = path.parent().ok_or_else(|| {
             CryptoError::InvalidFormat("keyslot file has no parent directory".into())
@@ -285,7 +306,7 @@ impl KeyslotFile {
             let _ = std::fs::remove_file(&tmp);
             return Err(error.into());
         }
-        Ok(())
+        Ok(digest)
     }
 }
 

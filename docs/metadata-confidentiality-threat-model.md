@@ -170,7 +170,7 @@ rather than explicitly enforcing owner-only modes on every path.
 | Inbox | Restrictive owner-only mode, atomic staging, bounded stale-partial cleanup | Intentional plaintext staging content and name until ingestion; forensic deletion limits |
 | Web fetch | Bounded body, HTTP status, and content type captured through one in-memory curl stream without a named body or header file | Process memory and pipe data while unlocked; network and endpoint observations |
 | DOCX external-tool input | Decrypted DOCX bytes stream to pandoc over a bounded process pipe; no application-owned named plaintext file | Unlocked same-user/process access to process memory and pipe data while extraction runs |
-| Backup | Keyed destination database, protected file copy, and copied-keyslot digest binding to the source unlock state before publication | Same structural residuals as source plus backup name and provider history |
+| Backup | Keyed destination database, protected file copy, under-barrier session recheck, and copied-keyslot digest binding to the source unlock state before publication | Same structural residuals as source plus backup name and provider history |
 | Migration and atomic residue | Fixed non-sensitive marker, authenticated staged containers, protected prepared database, one validated authoritative source | Fixed migration names; owner-derived inbox/backup temp prefixes; ULIDs in manifest, blob, and receipt temp names; staged/retired existence, sizes, and times; retired plaintext forensic residue after directory-entry removal |
 | Permissions | New directories/files are created owner-only on Unix; opening strips group/other bits while preserving deliberately removed owner bits; best portable effort elsewhere | Same-user processes retain owner authority; filesystem ACL/provider behavior may differ |
 
@@ -181,7 +181,8 @@ rather than explicitly enforcing owner-only modes on every path.
 2. New-vault creation accepts only an absent or empty real directory and
    refuses pre-seeded component paths before writing bundle data.
 3. Migration repeats logical inventory validation under an exclusive SQLite
-   writer boundary and retains it through legacy retirement.
+   writer boundary, rescans late legacy blobs at commit boundaries, and retains
+   or reacquires the database boundary through legacy retirement and cleanup.
 4. Wrong key, plaintext-at-v3-path, malformed page, or unsupported format never
    falls through to empty-database creation.
 5. Database, blob-address, TSB2 blob-encryption, receipt-encryption, and
@@ -200,6 +201,8 @@ rather than explicitly enforcing owner-only modes on every path.
     protected sentinel or legacy public hash outside the intentional inbox.
 11. Tessera makes no secure-deletion, unlocked-malware, traffic-analysis,
    same-uid isolation, or external rollback-detection claim.
+12. Keyslot mutation operations parse and hash one byte snapshot and refuse any
+    state that no longer matches the file that authenticated the in-memory DEK.
 
 ## Verification topology
 

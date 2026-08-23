@@ -18,6 +18,10 @@
 - Resume accepts a valid source-only, valid destination-only, or matching
   source-and-destination state. Any other state fails closed.
 - Orphaned authenticated blobs are converted and remain visible to diagnostics.
+- Blob conversion is repeated under the final database writer boundary, before
+  metadata commit, and during v3 cleanup. Any late legacy container is
+  authenticated, converted, and forces a retry rather than allowing a public
+  content-hash path to survive successful exit.
 
 ## Database transition
 
@@ -42,7 +46,9 @@
   MUST NOT be repaired by creating an empty database or fabricating rows.
 - Repeating migration after completion validates v3 and returns a no-op result.
 - Cleanup removes retired plaintext directory entries only after manifest and
-  selected database commit. No secure-deletion claim is made.
+  selected database commit. Post-manifest cleanup reacquires the exclusive
+  legacy-database writer boundary and unlinks the retired authority before
+  releasing it. No secure-deletion claim is made.
 
 ## Exit
 

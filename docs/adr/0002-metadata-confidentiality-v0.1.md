@@ -209,6 +209,10 @@ finding outside this set reopens the decision and requires owner review.
   exclusive SQLite writer boundary. New-vault creation refuses non-empty or
   symlinked targets, and backup publication binds copied keyslots to the source
   unlock state.
+- Late legacy blob containers are converted and force retry at the final
+  selection/commit boundaries; v3 cleanup reacquires the legacy writer lock.
+  Backup repeats active-session exclusion under its writer barrier, and
+  keyslot mutation cannot refresh trust from an unbound file.
 - Storage, migration, query, backup, restore, diagnostic, and repair costs are
   measured and reported with variance.
 - An independent reviewer challenges inventory completeness, confirmation

@@ -230,6 +230,8 @@ An online backup binds the copied `keyslot.bin` byte digest to the keyslot
 state that authenticated the source handle, then validates the copied database
 with the corresponding DEK before publishing the destination. A parseable but
 unrelated keyslot file therefore cannot be reported as a verified backup.
+Keyslot addition and removal parse and digest one exact byte snapshot and
+refuse mutation when that digest no longer matches the unlock-bound state.
 
 Binary layout (all integers little-endian):
 

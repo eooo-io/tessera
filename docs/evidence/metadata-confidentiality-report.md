@@ -13,7 +13,7 @@ pushed. This report contains synthetic aggregate evidence only.
 | Versioned metadata protections | Format v3 uses keyed SQLCipher, TSB2 opaque blobs, minimized manifest, encrypted model registry, and migration 0022 | `db::tests`; `vault::metadata::tests`; ADR-0002; `spec/vault-format.md` |
 | Locked scans match exposure set | Recursive path-and-byte scanners use only synthetic category sentinels, the real protected logical hash, UTF-8 case variants, public hashes, and UTF-16LE/BE encodings | `vault::metadata::tests::complete_synthetic_metadata_category_inventory_is_absent_while_locked`; `metadata_privacy::synthetic_metadata_inventory_and_confirmation_guesses_are_absent_when_locked`; `metadata_privacy::locked_visible_paths_match_the_documented_structural_allowlist` |
 | Inbox and temp residue bounded | Owner-only atomic partials; abandoned inbox partials are removed; web responses and DOCX source bytes stay in bounded process pipes without application-owned named plaintext files | inbox/web/extract tests and `metadata_privacy::bundle_directories_and_files_are_owner_only`; no secure-deletion claim for intentional inbox files |
-| Copy, backup, restore, cross-platform open | Keyed online backup binds copied keyslots to the source unlock state, creates a protected staging bundle, reopens and diagnoses it before publication; migrated fixture backs up, restores, unlocks, verifies, and extends its receipt chain; CI transfers a synthetic protected backup macOS to Ubuntu and a newly generated Ubuntu backup back to macOS | `recovery::tests::backup_refuses_a_structurally_valid_swapped_keyslot_file`; `vault::metadata::tests::legacy_migration_protects_database_manifest_and_blob_address`; `metadata_portability.rs`; `.github/workflows/ci.yml`; exact-head platform CI required below |
+| Copy, backup, restore, cross-platform open | Keyed online backup rechecks active sessions under its writer barrier, binds copied keyslots to the source unlock state, creates a protected staging bundle, reopens and diagnoses it before publication; migrated fixture backs up, restores, unlocks, verifies, and extends its receipt chain; CI transfers a synthetic protected backup macOS to Ubuntu and a newly generated Ubuntu backup back to macOS | `recovery::tests::{backup_rechecks_sessions_after_acquiring_its_writer_barrier,backup_refuses_a_structurally_valid_swapped_keyslot_file,keyslot_mutation_cannot_launder_a_foreign_file_into_backup_binding}`; `vault::metadata::tests::legacy_migration_protects_database_manifest_and_blob_address`; `metadata_portability.rs`; `.github/workflows/ci.yml`; exact-head platform CI required below |
 | Measure performance and repair tradeoffs | Controlled synthetic migration, storage, semantic query, diagnostics, repair, and backup measurements | `metadata_performance.rs`; ignored migration measurement; results below |
 | Format and security docs match | Format v3, ADR, threat model, Spec Kit artifacts, and recovery runbook describe the same boundary | `spec/vault-format.md`; `docs/adr/0002-metadata-confidentiality-v0.1.md`; `docs/recovery-runbook.md` |
 
@@ -44,7 +44,8 @@ or guarantee forensic deletion on journals, snapshots, SSDs, or providers.
   rows/markers, staging collisions, capacity and permission failures, fatal
   source diagnostics, successful and repeated conversion, logical inventory,
   row fingerprints, stale-export detection, exclusive selection against a
-  competing writer, migrated backup/restore,
+  competing writer, late legacy-blob conversion/retry, exclusive post-manifest
+  cleanup, migrated backup/restore,
   receipt verification/continuation, and resume after all five durable
   boundaries including the retire-before-select crash window. One performance
   test is intentionally ignored in the ordinary run. Bounded error-code tests
@@ -68,7 +69,7 @@ or guarantee forensic deletion on journals, snapshots, SSDs, or providers.
   on macOS.
 
 The final candidate's full `cargo test --workspace --all-targets` run passed
-368 tests with 4 intentionally ignored performance tests and no failures. The
+372 tests with 4 intentionally ignored performance tests and no failures. The
 required ignored workspace run passed all 4 ignored tests with no failures.
 
 ## Controlled performance
@@ -78,32 +79,38 @@ fixture only. These are regression observations, not production benchmarks.
 
 | Measurement | Run 1 | Run 2 | Run 3 | Observed range |
 |---|---:|---:|---:|---:|
-| Legacy migration | 656 ms | 659 ms | 644 ms | 2.3% |
+| Legacy migration | 641 ms | 650 ms | 648 ms | 1.4% |
 | Legacy/protected database size | 675,840 / 688,128 bytes | same | same | 1.8% protected overhead |
-| New protected vault creation, 21-sample median | 102 ms | 102 ms | 103 ms | 1.0% |
-| New protected vault creation, 21-sample p95 | 118 ms | 108 ms | 109 ms | 9.3% |
-| Ingest/extract/chunk 100 synthetic documents | 1,263 ms | 1,236 ms | 1,262 ms | 2.2% |
-| Protected semantic query top 10, 100-sample median | 1,160 us | 1,175 us | 1,171 us | 1.3% |
-| Protected semantic query top 10, 100-sample p95 | 1,333 us | 1,334 us | 1,336 us | 0.2% |
+| New protected vault creation, 21-sample median | 101 ms | 102 ms | 104 ms | 3.0% |
+| New protected vault creation, 21-sample p95 | 104 ms | 104 ms | 109 ms | 4.8% |
+| Ingest/extract/chunk 100 synthetic documents | 1,251 ms | 1,220 ms | 1,227 ms | 2.5% |
+| Per-document ingest median | 12,535 us | 12,154 us | 12,471 us | 3.1% |
+| Per-document ingest p95 | 14,175 us | 14,198 us | 14,351 us | 1.2% |
+| Protected semantic query top 10, 100-sample median | 1,142 us | 1,139 us | 1,145 us | 0.5% |
+| Protected semantic query top 10, 100-sample p95 | 1,308 us | 1,317 us | 1,307 us | 0.8% |
 | Diagnostics | 25 ms | 25 ms | 25 ms | 0.0% |
-| No-fault derived repair path | 167 ms | 166 ms | 170 ms | 2.4% |
-| Keyed backup including destination validation | 901 ms | 897 ms | 894 ms | 0.8% |
-| Restore open, diagnostics, and receipt verification | 105 ms | 107 ms | 105 ms | 1.9% |
+| No-fault derived repair path | 169 ms | 167 ms | 167 ms | 1.2% |
+| Keyed backup including destination validation | 901 ms | 887 ms | 908 ms | 2.4% |
+| Restore open, diagnostics, and receipt verification | 105 ms | 105 ms | 105 ms | 0.0% |
 | Source / backup bundle size | 7,133,489 / 2,502,769 bytes | same | same | WAL and derived state explain non-equivalence |
 
 No reported controlled final-state series varied by 10% or more. Reviewer
-reruns exposed 27.1% variation in the former one-shot query measurement, and a
-later one-shot creation observation varied by 25.9%. The test now reports a
-warmed 100-query distribution and a 21-creation distribution instead of
-selecting favorable single observations; median and p95 are retained. Exact
-values remain host-, filesystem-, cache-, fixture-, and build-profile-dependent.
+reruns exposed 27.1% variation in the former one-shot query measurement, a
+later one-shot creation observation varied by 25.9%, and independent exact-
+commit ingest reruns varied by 31.2% (967/1,032/1,269 ms). The test now reports
+a warmed 100-query distribution, a 21-creation distribution, and per-document
+ingest median/p95 instead of selecting favorable single observations. The
+fresh controlled total-ingest series is also retained above. Exact values
+remain host-, filesystem-, cache-, fixture-, and build-profile-dependent.
 
-The required ignored workspace run on the committed candidate recorded:
-migration 661 ms; protected-vault creation median/p95 105/115 ms across 21
-samples; 100-document ingest 1,259 ms; top-10 semantic query median/p95
-1,201/1,342 us across 100 samples; diagnostics 27 ms; repair 171 ms; backup
-927 ms; restore validation 106 ms. Those observations remain within the
-controlled ranges above and use the same database and bundle byte counts.
+The final pre-review state's required ignored workspace run recorded: migration
+702 ms; protected-vault creation median/p95 106/110 ms across 21 samples;
+100-document ingest 1,297 ms with per-document median/p95 13,015/14,924 us;
+top-10 semantic query median/p95 1,188/1,330 us across 100 samples; diagnostics
+25 ms; repair 171 ms; backup 961 ms; restore validation 113 ms. Those results
+remain within 10% of the fresh controlled series. Independent reruns of the
+prior candidate found the wider ingest range disclosed above rather than being
+discarded.
 
 ## Platform CI binding
 

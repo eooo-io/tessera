@@ -100,9 +100,12 @@ enum MigrationFailpoint {
     BeforeExportStorageFull,
     AfterPrepareConcurrentCommit,
     DuringExclusiveSelection,
+    #[cfg(test)]
+    DuringExclusiveLegacyBlobWrite,
     AfterRetire,
     AfterSelect,
     AfterManifest,
+    DuringV3Cleanup,
 }
 
 fn serialize<T: serde::Serialize>(value: &T) -> Result<String, DbError> {
@@ -267,28 +270,62 @@ fn migrate_at(
         {
             return Err(MetadataMigrationError::InvalidState);
         }
+        let blobs = BlobStore::open(&path.join("blobs")).map_err(VaultError::from)?;
+        let converted_blobs = blobs.migrate_legacy_blobs(&dek).map_err(VaultError::from)?;
         let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
         validate_database(&conn)?;
         hydrate_manifest(&conn, &mut manifest)?;
-        let source_schema_version = if path.join(RETIRED_NAME).is_file() {
+        let retired_path = path.join(RETIRED_NAME);
+        let retired_barrier = if retired_path.is_file() {
             let retired = crate::db::open_plaintext_database(&path.join(RETIRED_NAME))?;
             validate_database(&retired)?;
+            retired.execute_batch("BEGIN EXCLUSIVE")?;
+            let active = active_sessions(&retired)?;
+            if active > 0 {
+                return Err(MetadataMigrationError::ActiveSessions { count: active });
+            }
             compare_logical_inventory(&retired, &conn)?;
-            crate::db::migrations::schema_version(&retired)?
+            if failpoint == MigrationFailpoint::DuringV3Cleanup {
+                let competing = rusqlite::Connection::open(&retired_path)?;
+                competing.busy_timeout(std::time::Duration::ZERO)?;
+                if competing.execute_batch("BEGIN IMMEDIATE").is_ok() {
+                    let _ = competing.execute_batch("ROLLBACK");
+                    return Err(MetadataMigrationError::Validation(
+                        "v3 cleanup boundary admitted a competing writer".into(),
+                    ));
+                }
+            }
+            Some(retired)
+        } else {
+            None
+        };
+        let source_schema_version = if let Some(retired) = retired_barrier.as_ref() {
+            crate::db::migrations::schema_version(retired)?
         } else {
             crate::db::migrations::schema_version(&conn)?
         };
         drop(conn);
         validate_protected_state(path, &path.join("vault.db"), &manifest, &dek)?;
+        let late_blobs = blobs.migrate_legacy_blobs(&dek).map_err(VaultError::from)?;
+        if late_blobs > 0 {
+            return Err(MetadataMigrationError::Validation(
+                "legacy blob set changed during protected-state recovery".into(),
+            ));
+        }
         remove_if_exists(&path.join(PREPARED_NAME))?;
-        remove_database_and_sidecars(&path.join(RETIRED_NAME))?;
+        if let Some(retired) = retired_barrier {
+            remove_if_exists(&retired_path)?;
+            retired.execute_batch("ROLLBACK")?;
+            drop(retired);
+        }
+        remove_database_and_sidecars(&retired_path)?;
         remove_if_exists(&marker_path)?;
         remove_if_exists(&path.join(MARKER_TEMP_NAME))?;
         sync_directory(path)?;
         return Ok(MetadataMigrationReport {
             migrated: false,
             resumed: true,
-            converted_blobs: 0,
+            converted_blobs,
             source_schema_version,
         });
     }
@@ -339,7 +376,7 @@ fn migrate_at(
     }
 
     let blobs = BlobStore::open(&path.join("blobs")).map_err(VaultError::from)?;
-    let converted_blobs = blobs.migrate_legacy_blobs(&dek).map_err(VaultError::from)?;
+    let mut converted_blobs = blobs.migrate_legacy_blobs(&dek).map_err(VaultError::from)?;
     save_marker(path, MigrationPhase::BlobsProtected)?;
     if failpoint == MigrationFailpoint::AfterBlobs {
         return Err(MetadataMigrationError::Interrupted("blob protection"));
@@ -458,6 +495,19 @@ fn migrate_at(
                 "legacy source changed while the protected candidate was prepared".into(),
             ));
         }
+        #[cfg(test)]
+        if failpoint == MigrationFailpoint::DuringExclusiveLegacyBlobWrite {
+            blobs
+                .put_legacy_test(&dek, b"LATE-LEGACY-BLOB-WRITE-SENTINEL")
+                .map_err(VaultError::from)?;
+        }
+        let late_blobs = blobs.migrate_legacy_blobs(&dek).map_err(VaultError::from)?;
+        converted_blobs += late_blobs;
+        if late_blobs > 0 {
+            return Err(MetadataMigrationError::Validation(
+                "legacy blob set changed during protected database preparation".into(),
+            ));
+        }
         let active = active_sessions(&source)?;
         if active > 0 {
             return Err(MetadataMigrationError::ActiveSessions { count: active });
@@ -509,12 +559,22 @@ fn migrate_at(
         manifest: manifest.clone(),
         conn: selected,
         blobs,
-        dek: Some(dek),
+        dek: Some(dek.duplicate()),
         keyslot_digest: std::sync::Mutex::new(super::keyslot_digest_at(&path.join("keyslot.bin"))?),
     };
     crate::receipt::migrate_legacy_receipts(&mut migration_vault)?;
     crate::receipt::verify(&migration_vault)?;
     drop(migration_vault);
+    let late_blobs = BlobStore::open(&path.join("blobs"))
+        .map_err(VaultError::from)?
+        .migrate_legacy_blobs(&dek)
+        .map_err(VaultError::from)?;
+    converted_blobs += late_blobs;
+    if late_blobs > 0 {
+        return Err(MetadataMigrationError::Validation(
+            "legacy blob set changed during protected database selection".into(),
+        ));
+    }
     manifest.format_version = FORMAT_VERSION;
     manifest.save(&manifest_path).map_err(VaultError::from)?;
     save_marker(path, MigrationPhase::ManifestCommitted)?;
@@ -522,6 +582,17 @@ fn migrate_at(
         return Err(MetadataMigrationError::Interrupted("manifest commit"));
     }
 
+    let late_blobs = BlobStore::open(&path.join("blobs"))
+        .map_err(VaultError::from)?
+        .migrate_legacy_blobs(&dek)
+        .map_err(VaultError::from)?;
+    converted_blobs += late_blobs;
+    if late_blobs > 0 {
+        return Err(MetadataMigrationError::Validation(
+            "legacy blob set changed during metadata commit".into(),
+        ));
+    }
+    remove_if_exists(&retired)?;
     legacy_barrier.execute_batch("ROLLBACK")?;
     drop(legacy_barrier);
     remove_database_and_sidecars(&retired)?;
@@ -1893,6 +1964,65 @@ mod tests {
             crate::space::list(&vault).expect("spaces")[0].name,
             "concurrent-writer-preserved"
         );
+    }
+
+    #[test]
+    fn late_legacy_blob_write_is_protected_and_forces_retry() {
+        let (_directory, path, _hash) = legacy_fixture();
+        let late_hash = crate::blob::BlobHash(
+            blake3::hash(b"LATE-LEGACY-BLOB-WRITE-SENTINEL")
+                .to_hex()
+                .to_string(),
+        );
+        assert!(matches!(
+            migrate_at(
+                &path,
+                "migration-passphrase",
+                MigrationFailpoint::DuringExclusiveLegacyBlobWrite,
+            ),
+            Err(MetadataMigrationError::Validation(_))
+        ));
+        assert!(!path
+            .join("blobs")
+            .join(&late_hash.0[..2])
+            .join(&late_hash.0)
+            .exists());
+        assert!(path.join("vault.db").is_file());
+        assert!(!path.join(RETIRED_NAME).exists());
+
+        migrate(&path, "migration-passphrase").expect("retry after late blob write");
+        let vault = super::super::Vault::open(&path, "migration-passphrase").expect("open");
+        assert_eq!(
+            vault
+                .blobs()
+                .get(vault.dek().expect("dek"), &late_hash)
+                .expect("late blob retained as protected orphan"),
+            b"LATE-LEGACY-BLOB-WRITE-SENTINEL"
+        );
+    }
+
+    #[test]
+    fn post_manifest_cleanup_reacquires_exclusive_legacy_boundary() {
+        let (_directory, path, _hash) = legacy_fixture();
+        assert!(matches!(
+            migrate_at(
+                &path,
+                "migration-passphrase",
+                MigrationFailpoint::AfterManifest,
+            ),
+            Err(MetadataMigrationError::Interrupted(_))
+        ));
+        assert!(path.join(RETIRED_NAME).is_file());
+
+        let resumed = migrate_at(
+            &path,
+            "migration-passphrase",
+            MigrationFailpoint::DuringV3Cleanup,
+        )
+        .expect("exclusive v3 cleanup");
+        assert!(resumed.resumed);
+        assert!(!path.join(RETIRED_NAME).exists());
+        assert!(!migration_in_progress(&path));
     }
 
     #[test]

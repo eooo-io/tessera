@@ -460,6 +460,13 @@ fn copy_file_synced(source: &Path, destination: &Path) -> Result<(), std::io::Er
 /// an immediate DB barrier blocks concurrent writers while immutable/authenticated
 /// files and a SQLite online-backup snapshot are copied.
 pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
+    backup_at(vault, destination, || Ok(()))
+}
+
+fn backup_at<F>(vault: &Vault, destination: &Path, before_barrier: F) -> Result<(), RecoveryError>
+where
+    F: FnOnce() -> Result<(), RecoveryError>,
+{
     if destination.exists() {
         return Err(RecoveryError::DestinationExists(destination.to_path_buf()));
     }
@@ -498,12 +505,21 @@ pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
             .unwrap_or("vault"),
         std::process::id()
     ));
+    before_barrier()?;
     // Use a dedicated connection for the writer barrier. SQLite's online
     // backup API cannot advance when its own source connection holds a write
     // transaction, but a sibling reader can snapshot while this connection
     // excludes every other writer.
     let barrier = crate::db::open_database(&vault.path().join("vault.db"), vault.dek()?)?;
     barrier.execute_batch("BEGIN IMMEDIATE")?;
+    let active = scalar(
+        &barrier,
+        "SELECT COUNT(*) FROM sessions
+         WHERE status = 'active' AND julianday(expires_at) > julianday('now')",
+    )?;
+    if active > 0 {
+        return Err(RecoveryError::ActiveSessions(active));
+    }
     crate::vault::permissions::directory(&staging)?;
     let result = (|| -> Result<(), RecoveryError> {
         for file in ["tessera.json", "keyslot.bin"] {
@@ -979,6 +995,25 @@ mod tests {
         assert!(matches!(error, RecoveryError::ActiveSessions(1)));
     }
 
+    #[test]
+    fn backup_rechecks_sessions_after_acquiring_its_writer_barrier() {
+        let (dir, vault, _artifact_id) = vault_with_original();
+        let space_id = crate::space::list(&vault).expect("spaces")[0].id.clone();
+        let lens = crate::lens::LensPolicy::new("Racing backup lens", vec![space_id]);
+        let lens_id = crate::lens::create(&vault, &lens).expect("lens");
+        let pairing = crate::pairing::approve(&vault, &lens_id, "backup race", "racing-agent", 5)
+            .expect("pairing");
+        let destination = dir.path().join("RaceBlocked.tessera");
+
+        let error = backup_at(&vault, &destination, || {
+            crate::session::start(&vault, &pairing).expect("session wins initial-check race");
+            Ok(())
+        })
+        .expect_err("barrier recheck must refuse raced session");
+        assert!(matches!(error, RecoveryError::ActiveSessions(1)));
+        assert!(!destination.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn failed_backup_removes_private_staging_bundle() {
@@ -1027,6 +1062,39 @@ mod tests {
         .expect("swap structurally valid keyslot");
         let destination = dir.path().join("MustNotPublish.tessera");
 
+        assert!(matches!(
+            backup(&vault, &destination),
+            Err(RecoveryError::Vault(
+                crate::vault::VaultError::KeyslotBindingMismatch
+            ))
+        ));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn keyslot_mutation_cannot_launder_a_foreign_file_into_backup_binding() {
+        let (dir, vault, _artifact_id) = vault_with_original();
+        vault
+            .add_keyslot("source-recovery", &TEST_PARAMS)
+            .expect("source recovery slot");
+        let foreign_path = dir.path().join("ForeignTwoSlot.tessera");
+        let foreign = Vault::create_with_params(&foreign_path, "foreign", &TEST_PARAMS)
+            .expect("foreign vault");
+        foreign
+            .add_keyslot("foreign-recovery", &TEST_PARAMS)
+            .expect("foreign recovery slot");
+        drop(foreign);
+        std::fs::copy(
+            foreign_path.join("keyslot.bin"),
+            vault.path().join("keyslot.bin"),
+        )
+        .expect("swap foreign two-slot file");
+
+        assert!(matches!(
+            vault.remove_keyslot(0),
+            Err(crate::vault::VaultError::KeyslotBindingMismatch)
+        ));
+        let destination = dir.path().join("MustRemainUnpublished.tessera");
         assert!(matches!(
             backup(&vault, &destination),
             Err(RecoveryError::Vault(

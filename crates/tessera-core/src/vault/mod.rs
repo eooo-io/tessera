@@ -68,7 +68,7 @@ pub struct Vault {
 }
 
 fn keyslot_digest_at(path: &Path) -> Result<[u8; 32], VaultError> {
-    Ok(*blake3::hash(&std::fs::read(path)?).as_bytes())
+    Ok(KeyslotFile::load_bound(path)?.1)
 }
 
 impl Vault {
@@ -97,8 +97,7 @@ impl Vault {
         }
 
         let (keyslots, dek) = KeyslotFile::create(passphrase, params)?;
-        keyslots.save(&path.join("keyslot.bin"))?;
-        let keyslot_digest = keyslot_digest_at(&path.join("keyslot.bin"))?;
+        let keyslot_digest = keyslots.save_bound(&path.join("keyslot.bin"))?;
 
         let mut manifest = VaultManifest::new(chrono::Utc::now());
         manifest.crypto.kdf_m_cost_kib = params.m_cost_kib;
@@ -137,11 +136,7 @@ impl Vault {
         }
 
         let keyslot_path = path.join("keyslot.bin");
-        let keyslot_digest = keyslot_digest_at(&keyslot_path)?;
-        let keyslots = KeyslotFile::load(&keyslot_path)?;
-        if keyslot_digest_at(&keyslot_path)? != keyslot_digest {
-            return Err(VaultError::KeyslotBindingMismatch);
-        }
+        let (keyslots, keyslot_digest) = KeyslotFile::load_bound(&keyslot_path)?;
         let dek = keyslots.unlock(passphrase)?;
 
         Self::open_with_dek(path, dek, keyslot_digest)
@@ -166,17 +161,14 @@ impl Vault {
             return Err(VaultError::MetadataMigrationRequired);
         }
         let keyslot_path = path.join("keyslot.bin");
-        let keyslot_digest = keyslot_digest_at(&keyslot_path)?;
+        let (keyslots, keyslot_digest) = KeyslotFile::load_bound(&keyslot_path)?;
         if keyslot_digest != expected_keyslot_digest {
             return Err(VaultError::KeyslotBindingMismatch);
         }
         // Parsing the exact copied keyslot bytes is part of bundle validation
         // even though the already-authenticated DEK avoids retaining a
         // passphrase during backup verification.
-        KeyslotFile::load(&keyslot_path)?;
-        if keyslot_digest_at(&keyslot_path)? != expected_keyslot_digest {
-            return Err(VaultError::KeyslotBindingMismatch);
-        }
+        drop(keyslots);
 
         let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
         metadata::hydrate_manifest(&conn, &mut manifest)?;
@@ -205,19 +197,29 @@ impl Vault {
     /// Add a recovery/rotation keyslot wrapping the existing DEK. Source blobs
     /// are not re-encrypted; every keyslot unlocks the same portable vault.
     pub fn add_keyslot(&self, passphrase: &str, params: &KdfParams) -> Result<usize, VaultError> {
-        let mut keyslots = KeyslotFile::load(&self.path.join("keyslot.bin"))?;
+        let keyslot_path = self.path.join("keyslot.bin");
+        let expected = self.keyslot_digest()?;
+        let (mut keyslots, actual) = KeyslotFile::load_bound(&keyslot_path)?;
+        if actual != expected {
+            return Err(VaultError::KeyslotBindingMismatch);
+        }
         keyslots.add_slot(self.dek()?, passphrase, params)?;
-        keyslots.save(&self.path.join("keyslot.bin"))?;
-        self.refresh_keyslot_digest()?;
+        let digest = keyslots.save_bound(&keyslot_path)?;
+        self.set_keyslot_digest(digest)?;
         Ok(keyslots.slot_count() - 1)
     }
 
     /// Remove one keyslot. The keyslot layer refuses removal of the last slot.
     pub fn remove_keyslot(&self, index: usize) -> Result<(), VaultError> {
-        let mut keyslots = KeyslotFile::load(&self.path.join("keyslot.bin"))?;
+        let keyslot_path = self.path.join("keyslot.bin");
+        let expected = self.keyslot_digest()?;
+        let (mut keyslots, actual) = KeyslotFile::load_bound(&keyslot_path)?;
+        if actual != expected {
+            return Err(VaultError::KeyslotBindingMismatch);
+        }
         keyslots.remove_slot(index)?;
-        keyslots.save(&self.path.join("keyslot.bin"))?;
-        self.refresh_keyslot_digest()?;
+        let digest = keyslots.save_bound(&keyslot_path)?;
+        self.set_keyslot_digest(digest)?;
         Ok(())
     }
 
@@ -257,8 +259,7 @@ impl Vault {
             .map_err(|_| VaultError::KeyslotStateUnavailable)
     }
 
-    fn refresh_keyslot_digest(&self) -> Result<(), VaultError> {
-        let digest = keyslot_digest_at(&self.path.join("keyslot.bin"))?;
+    fn set_keyslot_digest(&self, digest: [u8; 32]) -> Result<(), VaultError> {
         *self
             .keyslot_digest
             .lock()
