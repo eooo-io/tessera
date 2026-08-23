@@ -138,6 +138,7 @@ As the vault owner, I want documentation and diagnostics to state exactly what r
 - The v0.1 contract protects a locked bundle and its backups. It does not protect plaintext intentionally placed in the inbox, explicitly exported by the owner, or available to a process while unlocked.
 - Stable opaque identifiers, row counts, ciphertext lengths, bundle topology, file modification times, and access patterns may remain visible only where documented and justified in the exposure matrix.
 - Migration may require temporary additional disk capacity up to the documented bound, but must preserve the legacy authoritative database until the protected replacement validates.
+- Migration is an offline, quiescent upgrade. The owner closes every Tessera and Guardian process and every legacy-vault handle before entry; writes from a pre-upgrade process that violates this precondition are not promised.
 - Secure deletion cannot be guaranteed across filesystems, SSD controllers, snapshots, and backup providers; Tessera minimizes newly created plaintext copies and removes directory entries when safe.
 - The feature may change the bundle format while keeping the format open, self-contained, and portable.
 

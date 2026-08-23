@@ -92,8 +92,11 @@ exact-content verifier.
 ## Migration authority and atomicity
 
 Ordinary open does not silently rewrite a legacy vault. The owner runs an
-explicit confirmed migration after making a verified offline copy. The
-migration refuses active Guardian sessions and fatal source diagnostics.
+explicit confirmed migration after making a verified offline copy and closing
+every Tessera and Guardian process and every legacy-vault handle. The
+migration refuses active Guardian sessions and fatal source diagnostics. The
+current binary refuses new ordinary legacy-vault opens, but an already-running
+pre-upgrade binary cannot be forced to honor a protocol it does not know.
 
 Each blob replacement is authenticated and synced before the legacy path is
 removed. The database replacement is written and validated separately. The
@@ -109,6 +112,13 @@ copy/backup/restore remain supported. Old binaries cannot open format v3, which
 is the intended meaning of the major format version. An owner can preserve an
 offline v2 copy before migrating; Tessera does not leave a plaintext rollback
 copy inside a successfully migrated vault.
+
+The concurrent-change guarantee is therefore bounded by the offline-upgrade
+precondition. A source commit completed before exclusive selection makes the
+candidate stale and forces retry. Tessera does not promise to preserve a write
+attempted later through an already-open pre-upgrade database inode, or to stop
+that process from recreating arbitrary legacy filesystem residue after a
+finite scan.
 
 ## Consequences
 

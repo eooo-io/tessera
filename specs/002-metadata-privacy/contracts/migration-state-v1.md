@@ -4,6 +4,10 @@
 
 - Migration requires an unlocked legacy keyslot and explicit owner
   confirmation.
+- Migration is an offline upgrade: every Tessera and Guardian process and
+  every open legacy-vault handle MUST be closed before entry. A pre-upgrade
+  binary does not know the v3 protocol and is not a supported concurrent
+  writer.
 - It refuses unsupported manifest versions, active Guardian sessions,
   insufficiently understood staged files, and fatal source diagnostics.
 - It creates the fixed marker atomically with owner-only permissions before
@@ -21,15 +25,19 @@
 - Blob conversion is repeated under the final database writer boundary, before
   metadata commit, and during v3 cleanup. Any late legacy container is
   authenticated, converted, and forces a retry rather than allowing a public
-  content-hash path to survive successful exit.
+  content-hash path to survive successful exit under the quiescence
+  precondition. A process that ignores that precondition can recreate
+  arbitrary filesystem residue after any finite scan.
 
 ## Database transition
 
 - The source WAL is checkpointed before export. Selection then acquires an
   exclusive SQLite writer boundary, repeats active-session and complete logical
   inventory validation, and retains that boundary until the legacy authority
-  is retired. A concurrent commit makes the staged candidate stale and causes
-  fail-closed retry rather than data loss.
+  is retired. A commit completed before exclusive selection makes the staged
+  candidate stale and causes fail-closed retry rather than data loss. Writes
+  attempted afterward by an already-open pre-upgrade handle are outside the
+  supported offline migration contract.
 - The protected staged database is a complete logical export of the source,
   including schema, triggers, virtual tables, migration ledger, and data.
 - Source and staged inventories, full integrity checks, foreign-key checks, and required
@@ -52,8 +60,9 @@
 
 ## Exit
 
-- Success leaves format v3, no migration marker, no legacy blob containers,
-  no plaintext database or sidecars, and a full evidence summary.
+- Success under the entry precondition leaves format v3, no migration marker,
+  no legacy blob containers, no plaintext database or sidecars, and a full
+  evidence summary.
 - Failure returns one bounded code from the documented migration error classes
   and stable recovery guidance without
   echoing metadata, keys, passphrases, content, or unvalidated claims about

@@ -92,7 +92,7 @@ fixture only. These are regression observations, not production benchmarks.
 | No-fault derived repair path | 169 ms | 167 ms | 167 ms | 1.2% |
 | Keyed backup including destination validation | 901 ms | 887 ms | 908 ms | 2.4% |
 | Restore open, diagnostics, and receipt verification | 105 ms | 105 ms | 105 ms | 0.0% |
-| Source / backup bundle size | 7,133,489 / 2,502,769 bytes | same | same | WAL and derived state explain non-equivalence |
+| Source / backup bundle size | 7,133,489 / 2,502,769 bytes | same | same | online-backup compaction and WAL/page layout explain non-equivalence |
 
 No reported controlled final-state series varied by 10% or more. Reviewer
 reruns exposed 27.1% variation in the former one-shot query measurement, a
@@ -133,6 +133,11 @@ discarded.
   entries but cannot promise physical erasure.
 - The migration requires temporary capacity for both database representations
   and, during conversion, old and new blob containers.
+- Metadata migration is an offline upgrade. All Tessera and Guardian processes
+  and legacy-vault handles must be closed first. Commits completed before
+  exclusive selection are detected and retained for retry; an already-running
+  pre-upgrade process that violates this precondition cannot be forced to stop
+  writing an open retired inode or arbitrary filesystem residue.
 - Whole-bundle rollback cannot be detected without a trusted external state.
 - Synthetic fixtures prove the implementation boundary, not private-corpus
   retrieval quality or production provider behavior.

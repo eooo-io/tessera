@@ -183,6 +183,8 @@ rather than explicitly enforcing owner-only modes on every path.
 3. Migration repeats logical inventory validation under an exclusive SQLite
    writer boundary, rescans late legacy blobs at commit boundaries, and retains
    or reacquires the database boundary through legacy retirement and cleanup.
+   This assumes the documented offline-upgrade precondition: every Tessera and
+   Guardian process and every legacy-vault handle is closed before entry.
 4. Wrong key, plaintext-at-v3-path, malformed page, or unsupported format never
    falls through to empty-database creation.
 5. Database, blob-address, TSB2 blob-encryption, receipt-encryption, and
@@ -203,6 +205,14 @@ rather than explicitly enforcing owner-only modes on every path.
    same-uid isolation, or external rollback-detection claim.
 12. Keyslot mutation operations parse and hash one byte snapshot and refuse any
     state that no longer matches the file that authenticated the in-memory DEK.
+
+An already-running pre-upgrade binary is an unlocked same-uid process that
+does not know the v3 migration protocol. The current binary refuses new
+ordinary v1/v2 opens, and migration preserves commits completed before its
+exclusive selection boundary. It cannot force a pre-upgrade process to close
+an existing database inode or prevent that process from writing arbitrary
+filesystem residue after the final scan. The owner must stop all such
+processes and preserve the required offline copy before migration.
 
 ## Verification topology
 

@@ -42,7 +42,8 @@ then `tessera model reindex` before restored content can be disclosed again.
 
 ## Legacy metadata migration
 
-Make a complete offline bundle copy, stop Guardian writers, and then run:
+Make a complete offline bundle copy, stop every Tessera and Guardian process,
+and close every open handle to the legacy vault before running:
 
 ```bash
 tessera --vault /path/V.tessera metadata migrate --yes
@@ -55,6 +56,15 @@ SQLCipher export, and retains `.vault.db.v2.retired` until the protected
 database and minimized format-v3 manifest reopen successfully. Rerun the same
 command after interruption. Do not rename or delete `.metadata-migration-v3`,
 `.vault.db.v3.prepared`, or `.vault.db.v2.retired` by hand.
+
+This is an offline, quiescent upgrade. The current binary prevents a new
+ordinary legacy-vault open, but it cannot revoke an already-running
+pre-upgrade process that ignores the v3 protocol. Such a process could write
+to an open retired database inode or create a legacy blob after the final
+scan. Commits completed before exclusive selection are detected and preserved
+on retry; writes attempted by a process that violates the quiescence
+precondition are not promised. Preserve the offline copy and verify that old
+processes have exited before migration.
 
 The conversion temporarily requires space for both database representations
 and converted blob containers. A capacity or permission failure retains the
