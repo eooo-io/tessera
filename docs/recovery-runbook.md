@@ -145,9 +145,11 @@ breakage. All are owner-action failures; none authorizes automatic evidence
 rewriting.
 
 The recovery tests run on the local macOS gate and the repository Linux CI
-runner. Platform success means the same deterministic fixtures pass on both;
-it does not pretend that every filesystem, power-loss mode, or disk firmware has
-been physically fault-tested.
+runner. Exact-head CI also uploads a synthetic macOS-created protected backup,
+opens and verifies it on Ubuntu, then uploads an Ubuntu-created backup and
+opens and verifies it on macOS. This proves the documented bundle interchange
+for the tested formats; it does not pretend that every filesystem, power-loss
+mode, or disk firmware has been physically fault-tested.
 
 The exact scenario-to-test ledger is
 [`evidence/recovery-fault-matrix.md`](evidence/recovery-fault-matrix.md).

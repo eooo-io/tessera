@@ -12,8 +12,8 @@ pushed. This report contains synthetic aggregate evidence only.
 | Remove exact-content confirmation | Public logical BLAKE3 hashes remain inside SQLCipher and protected receipts; locked paths use vault-keyed BLAKE3 tokens | `blob::tests::public_content_hash_is_absent_from_blob_path_and_container`; `locked_visible_address_is_keyed_and_cross_vault_unlinkable`; 100-candidate scanner test |
 | Versioned metadata protections | Format v3 uses keyed SQLCipher, TSB2 opaque blobs, minimized manifest, encrypted model registry, and migration 0022 | `db::tests`; `vault::metadata::tests`; ADR-0002; `spec/vault-format.md` |
 | Locked scans match exposure set | Recursive path-and-byte scanner uses only synthetic category sentinels and the real protected logical hash | `metadata_privacy::synthetic_metadata_inventory_and_confirmation_guesses_are_absent_when_locked` |
-| Inbox and temp residue bounded | Owner-only atomic partials; abandoned inbox partials are removed; fetched bodies remain in bounded memory; unavoidable external-tool files use owner-only temporary directories | inbox/web/extract tests and `metadata_privacy::bundle_directories_and_files_are_owner_only`; no secure-deletion claim |
-| Copy, backup, restore, cross-platform open | Keyed online backup creates a protected staging bundle, reopens and diagnoses it before publication; migrated fixture backs up, restores, unlocks, verifies, and extends its receipt chain | `vault::metadata::tests::legacy_migration_protects_database_manifest_and_blob_address`; `recovery::tests::backup_restores_same_source_identity_at_new_path`; `failed_backup_removes_private_staging_bundle`; exact-head platform CI required below |
+| Inbox and temp residue bounded | Owner-only atomic partials; abandoned inbox partials are removed; web responses and DOCX source bytes stay in bounded process pipes without application-owned named plaintext files | inbox/web/extract tests and `metadata_privacy::bundle_directories_and_files_are_owner_only`; no secure-deletion claim for intentional inbox files |
+| Copy, backup, restore, cross-platform open | Keyed online backup creates a protected staging bundle, reopens and diagnoses it before publication; migrated fixture backs up, restores, unlocks, verifies, and extends its receipt chain; CI transfers a synthetic protected backup macOS to Ubuntu and a newly generated Ubuntu backup back to macOS | `vault::metadata::tests::legacy_migration_protects_database_manifest_and_blob_address`; recovery tests; `metadata_portability.rs`; `.github/workflows/ci.yml`; exact-head platform CI required below |
 | Measure performance and repair tradeoffs | Controlled synthetic migration, storage, semantic query, diagnostics, repair, and backup measurements | `metadata_performance.rs`; ignored migration measurement; results below |
 | Format and security docs match | Format v3, ADR, threat model, Spec Kit artifacts, and recovery runbook describe the same boundary | `spec/vault-format.md`; `docs/adr/0002-metadata-confidentiality-v0.1.md`; `docs/recovery-runbook.md` |
 
@@ -50,15 +50,21 @@ or guarantee forensic deletion on journals, snapshots, SSDs, or providers.
   every stable path class and find zero locked-byte or path matches for the
   synthetic protected categories, real logical content hashes, and 100
   guessed-document hashes including one known-present candidate. Focused fault
-  tests cover transient migration, backup, inbox, blob, receipt, and external
-  tool paths that cannot all exist in one stable closed-bundle fixture.
+  tests cover transient migration, backup, inbox, blob, and receipt paths that
+  cannot all exist in one stable closed-bundle fixture; web and DOCX tests bind
+  the no-named-plaintext process-pipe boundary.
 - Blob protection: 17 focused unit tests cover TSB2 framing, address binding,
   cross-vault unlinkability, tamper, wrong key, deduplication, atomic writes,
   authenticated legacy conversion, orphan conversion, and unknown residue.
 - CLI confirmation: 1 focused end-to-end test passed for explicit `--yes` and
-  idempotent format-v3 operation.
+  idempotent format-v3 operation, plus bounded malformed-state recovery
+  guidance.
+- Portable artifact interchange: 2 local integration tests passed. Exact-head
+  CI additionally exports and locally verifies a synthetic protected backup on
+  macOS, opens it on Ubuntu, exports a new Ubuntu backup, and opens that backup
+  on macOS.
 
-The final local `cargo test --workspace --all-targets` run passed 360 tests
+The final local `cargo test --workspace --all-targets` run passed 363 tests
 with 4 intentionally ignored performance tests and no failures. The required
 ignored workspace run then passed all 4 ignored tests with no failures.
 
@@ -69,25 +75,28 @@ fixture only. These are regression observations, not production benchmarks.
 
 | Measurement | Run 1 | Run 2 | Variance |
 |---|---:|---:|---:|
-| Legacy migration | 605 ms | 595 ms | 1.7% |
+| Legacy migration | 620 ms | 588 ms | 5.4% |
 | Legacy/protected database size | 675,840 / 688,128 bytes | same | 1.8% protected overhead |
-| New protected vault creation | 116 ms | 119 ms | 2.6% |
-| Ingest/extract/chunk 100 synthetic documents | 1,285 ms | 1,277 ms | 0.6% |
-| Protected semantic query, top 10 | 1,570 us | 1,699 us | 8.2% |
-| Diagnostics | 26 ms | 27 ms | 3.8% |
-| No-fault derived repair path | 174 ms | 173 ms | 0.6% |
-| Keyed backup including destination validation | 958 ms | 958 ms | 0.0% |
-| Restore open, diagnostics, and receipt verification | 108 ms | 107 ms | 0.9% |
+| New protected vault creation | 127 ms | 134 ms | 5.5% |
+| Ingest/extract/chunk 100 synthetic documents | 1,288 ms | 1,237 ms | 4.1% |
+| Protected semantic query, top 10 | 1,665 us | 1,583 us | 5.2% |
+| Diagnostics | 26 ms | 26 ms | 0.0% |
+| No-fault derived repair path | 167 ms | 168 ms | 0.6% |
+| Keyed backup including destination validation | 916 ms | 942 ms | 2.8% |
+| Restore open, diagnostics, and receipt verification | 107 ms | 107 ms | 0.0% |
 | Source / backup bundle size | 7,133,489 / 2,502,769 bytes | same | WAL and derived state explain non-equivalence |
 
 No reported final-state pair varied by 10% or more. Exact values remain host-,
 filesystem-, cache-, fixture-, and build-profile-dependent.
 
-The final required ignored-suite observation remained inside those controlled
-ranges: migration 603 ms; protected vault creation 112 ms; 100-document ingest
-1,306 ms; top-10 semantic query 1,629 us; diagnostics 27 ms; repair 175 ms;
-backup 949 ms; restore validation 108 ms. It measured the same database and
-bundle byte counts shown above.
+The final required ignored-suite observation was: migration 603 ms; protected
+vault creation 111 ms; 100-document ingest 1,185 ms; top-10 semantic query
+1,599 us; diagnostics 27 ms; repair 174 ms; backup 905 ms; restore validation
+109 ms. Creation was 14.4% below the slower controlled rerun, so the benchmark
+was immediately repeated under the same fixture; the reported 127/134 ms pair
+then varied by 5.5%. The ignored-suite observation is retained here rather than
+discarded. All runs measured the same database and bundle byte counts shown
+above.
 
 ## Platform CI binding
 
@@ -95,6 +104,8 @@ bundle byte counts shown above.
   [green macOS and Ubuntu workflow](https://github.com/eooo-io/tessera/actions/runs/32565765214).
 - Exact PR-head macOS: pending publication.
 - Exact PR-head Ubuntu: pending publication.
+- Exact PR-head macOS-to-Ubuntu-to-macOS protected-bundle interchange: pending
+  publication.
 
 ## Known limitations
 

@@ -20,6 +20,7 @@ cargo test -p tessera-core blob::tests -- --nocapture
 cargo test -p tessera-core vault::metadata::tests -- --nocapture
 cargo test -p tessera-core --test metadata_privacy -- --nocapture
 cargo test -p tessera-core recovery::tests -- --nocapture
+cargo test -p tessera-core --test metadata_portability -- --nocapture
 cargo test -p tessera-cli metadata_migration -- --nocapture
 cargo test -p tessera-core legacy_migration_performance_measurement -- --ignored --nocapture
 cargo test -p tessera-core --test metadata_performance -- --ignored --nocapture

@@ -473,7 +473,8 @@ fn migrate_at(
 fn load_marker_or_default(path: &Path) -> Result<MigrationMarker, MetadataMigrationError> {
     let marker_path = path.join(MARKER_NAME);
     if marker_path.is_file() {
-        let marker: MigrationMarker = serde_json::from_slice(&std::fs::read(marker_path)?)?;
+        let marker: MigrationMarker = serde_json::from_slice(&std::fs::read(marker_path)?)
+            .map_err(|_| MetadataMigrationError::InvalidState)?;
         return Ok(marker);
     }
     Ok(MigrationMarker {
@@ -701,31 +702,42 @@ mod tests {
     struct MigrationEmbedder;
 
     fn assert_locked_value_absent(root: &Path, value: &str) {
-        fn visit(root: &Path, path: &Path, value: &str) {
+        let variants = [
+            value.to_owned(),
+            value.to_ascii_lowercase(),
+            value.to_ascii_uppercase(),
+            blake3::hash(value.as_bytes()).to_hex().to_string(),
+        ];
+        fn visit(root: &Path, path: &Path, variants: &[String]) {
             for entry in std::fs::read_dir(path).expect("read locked bundle") {
                 let entry = entry.expect("bundle entry");
                 let path = entry.path();
                 let relative = path.strip_prefix(root).expect("relative bundle path");
-                assert!(
-                    !relative.to_string_lossy().contains(value),
-                    "protected value leaked through path {}",
-                    relative.display()
-                );
-                if path.is_dir() {
-                    visit(root, &path, value);
-                } else {
-                    let bytes = std::fs::read(&path).expect("read locked file");
+                let relative_text = relative.to_string_lossy();
+                for variant in variants {
                     assert!(
-                        !bytes
-                            .windows(value.len())
-                            .any(|window| window == value.as_bytes()),
-                        "protected value leaked through bytes in {}",
+                        !relative_text.contains(variant),
+                        "protected sentinel encoding leaked through path {}",
                         relative.display()
                     );
                 }
+                if path.is_dir() {
+                    visit(root, &path, variants);
+                } else {
+                    let bytes = std::fs::read(&path).expect("read locked file");
+                    for variant in variants {
+                        assert!(
+                            !bytes
+                                .windows(variant.len())
+                                .any(|window| window == variant.as_bytes()),
+                            "protected sentinel encoding leaked through bytes in {}",
+                            relative.display()
+                        );
+                    }
+                }
             }
         }
-        visit(root, root, value);
+        visit(root, root, &variants);
     }
 
     impl EmbeddingProvider for MigrationEmbedder {
@@ -852,18 +864,54 @@ mod tests {
         let title = "PRIVATE-TITLE-CATEGORY-SENTINEL-ISSUE50";
         let tag_name = "PRIVATE-TAG-CATEGORY-SENTINEL-ISSUE50";
         let timestamp = "PRIVATE-TIMESTAMP-CATEGORY-SENTINEL-ISSUE50";
+        let manifest_created_at = "2042-01-02T03:04:05.678901Z";
+        let manifest_extension = "PRIVATE-MANIFEST-EXTENSION-SENTINEL-ISSUE50";
         let source_url = "https://metadata.invalid/PRIVATE-SOURCE-URL-SENTINEL-ISSUE50";
+        let staged_filename = "PRIVATE-WEB-STAGING-FILENAME-SENTINEL-ISSUE50.md";
         let project = "PRIVATE-PROJECT-CATEGORY-SENTINEL-ISSUE50";
         let repository = "PRIVATE-REPOSITORY-CATEGORY-SENTINEL-ISSUE50";
+        let working_directory = "PRIVATE-WORKDIR-CATEGORY-SENTINEL-ISSUE50";
         let branch = "PRIVATE-BRANCH-CATEGORY-SENTINEL-ISSUE50";
+        let git_commit = "PRIVATE-COMMIT-CATEGORY-SENTINEL-ISSUE50";
+        let source_file = "PRIVATE-SOURCE-FILE-CATEGORY-SENTINEL-ISSUE50";
         let session_purpose = "PRIVATE-SESSION-PURPOSE-SENTINEL-ISSUE50";
         let pairing_agent = "PRIVATE-PAIRING-AGENT-SENTINEL-ISSUE50";
         let processing_error = "PRIVATE-PROCESSING-ERROR-SENTINEL-ISSUE50";
+        let ingestion_error = "PRIVATE-INGESTION-ERROR-SENTINEL-ISSUE50";
         let oauth_client = "PRIVATE-OAUTH-CLIENT-SENTINEL-ISSUE50";
+        let oauth_client_name = "PRIVATE-OAUTH-CLIENT-NAME-SENTINEL-ISSUE50";
+        let oauth_redirect = "https://oauth.invalid/PRIVATE-REDIRECT-SENTINEL-ISSUE50";
+        let oauth_code_hash = "PRIVATE-OAUTH-CODE-HASH-SENTINEL-ISSUE50";
+        let oauth_challenge = "PRIVATE-OAUTH-CHALLENGE-SENTINEL-ISSUE50";
+        let oauth_token_hash = "PRIVATE-OAUTH-TOKEN-HASH-SENTINEL-ISSUE50";
         let oauth_resource = "PRIVATE-OAUTH-RESOURCE-SENTINEL-ISSUE50";
         let conversation_id = "PRIVATE-CONVERSATION-ID-SENTINEL-ISSUE50";
+        let archive_id = "PRIVATE-CONVERSATION-ARCHIVE-SENTINEL-ISSUE50";
+        let source_record_id = "PRIVATE-SOURCE-RECORD-SENTINEL-ISSUE50";
+        let node_id = "PRIVATE-CONVERSATION-NODE-SENTINEL-ISSUE50";
+        let part_id = "PRIVATE-CONVERSATION-PART-SENTINEL-ISSUE50";
+        let attachment_id = "PRIVATE-ATTACHMENT-ID-SENTINEL-ISSUE50";
+        let attachment_hash = "PRIVATE-ATTACHMENT-HASH-SENTINEL-ISSUE50";
+        let provenance_tool = "PRIVATE-PROVENANCE-TOOL-SENTINEL-ISSUE50";
+        let provenance_id = "PRIVATE-PROVENANCE-ID-SENTINEL-ISSUE50";
+        let derived_text_id = "PRIVATE-DERIVED-ID-SENTINEL-ISSUE50";
+        let summary_id = "PRIVATE-SUMMARY-ID-SENTINEL-ISSUE50";
+        let image_derivation_id = "PRIVATE-IMAGE-DERIVATION-ID-SENTINEL-ISSUE50";
+        let conversation_derived_id = "PRIVATE-CONVERSATION-DERIVED-ID-SENTINEL-ISSUE50";
+        let conversation_derivation_id = "PRIVATE-CONVERSATION-DERIVATION-ID-SENTINEL-ISSUE50";
+        let conversation_chunk_id = "PRIVATE-CONVERSATION-CHUNK-ID-SENTINEL-ISSUE50";
+        let ingestion_run_id = "PRIVATE-INGESTION-RUN-SENTINEL-ISSUE50";
+        let ingestion_item_id = "PRIVATE-INGESTION-ITEM-SENTINEL-ISSUE50";
+        let source_export_id = "PRIVATE-SOURCE-EXPORT-SENTINEL-ISSUE50";
         let model_name = "PRIVATE-MODEL-REGISTRY-SENTINEL-ISSUE50";
-        let content = b"PRIVATE-CONTENT-CATEGORY-SENTINEL-ISSUE50";
+        let model_version = "PRIVATE-MODEL-VERSION-SENTINEL-ISSUE50";
+        let original_content = "PRIVATE-ORIGINAL-CONTENT-SENTINEL-ISSUE50";
+        let derived_content = "PRIVATE-DERIVED-CONTENT-SENTINEL-ISSUE50";
+        let summary_content = "PRIVATE-SUMMARY-CONTENT-SENTINEL-ISSUE50";
+        let thumbnail_content = "PRIVATE-IMAGE-THUMBNAIL-SENTINEL-ISSUE50";
+        let ocr_content = "PRIVATE-IMAGE-OCR-SENTINEL-ISSUE50";
+        let caption_content = "PRIVATE-IMAGE-CAPTION-SENTINEL-ISSUE50";
+        let conversation_content = "PRIVATE-CONVERSATION-BLOB-SENTINEL-ISSUE50";
 
         let space = crate::space::create(&vault, space_name, None).expect("space");
         let (artifact, version) = crate::artifact::register_encrypted_bytes(
@@ -872,7 +920,7 @@ mod tests {
             filename,
             "text/markdown",
             crate::artifact::Sensitivity::Restricted,
-            content,
+            original_content.as_bytes(),
         )
         .expect("artifact");
         crate::artifact::tag(&vault, &artifact, tag_name).expect("tag");
@@ -897,17 +945,41 @@ mod tests {
             .execute(
                 "INSERT INTO oauth_clients
                  (client_id, client_name, redirect_uris_json, created_at)
-                 VALUES (?1, 'private OAuth client', '[\"https://oauth.invalid/callback\"]', ?2)",
-                rusqlite::params![oauth_client, timestamp],
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    oauth_client,
+                    oauth_client_name,
+                    serde_json::json!([oauth_redirect]).to_string(),
+                    timestamp
+                ],
             )
             .expect("OAuth client metadata");
         vault
             .conn()
             .execute(
+                "INSERT INTO oauth_authorization_codes
+                 (code_hash, client_id, pairing_id, redirect_uri, code_challenge,
+                  resource, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    oauth_code_hash,
+                    oauth_client,
+                    pairing.id,
+                    oauth_redirect,
+                    oauth_challenge,
+                    oauth_resource,
+                    timestamp
+                ],
+            )
+            .expect("OAuth authorization metadata");
+        vault
+            .conn()
+            .execute(
                 "INSERT INTO oauth_access_tokens
                  (token_hash, client_id, pairing_id, lens_id, resource, created_at, expires_at)
-                 VALUES ('private-oauth-token-hash-sentinel-issue50', ?1, ?2, ?3, ?4, ?5, ?5)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                 rusqlite::params![
+                    oauth_token_hash,
                     oauth_client,
                     pairing.id,
                     lens_id.0,
@@ -940,11 +1012,27 @@ mod tests {
             vault.conn(),
             EmbeddingModelEntry {
                 name: model_name.into(),
-                version: "private-inventory-model@v1".into(),
+                version: model_version.into(),
                 dimensions: 384,
             },
         )
         .expect("model registry");
+        put_json(
+            vault.conn(),
+            CREATED_AT,
+            &serde_json::to_string(manifest_created_at).expect("private created-at JSON"),
+        )
+        .expect("private creation time");
+        put_json(
+            vault.conn(),
+            MANIFEST_EXTENSIONS,
+            &serde_json::json!({
+                "top_level": {"synthetic_private_extension": manifest_extension},
+                "crypto": {"synthetic_private_crypto_extension": manifest_extension}
+            })
+            .to_string(),
+        )
+        .expect("private manifest extensions");
         vault
             .conn()
             .execute(
@@ -955,12 +1043,109 @@ mod tests {
         vault
             .conn()
             .execute(
+                "INSERT INTO web_staging
+                 (staged_filename, source_url, final_url, title, published_at, fetched_at)
+                 VALUES (?1, ?2, ?2, ?3, ?4, ?4)",
+                rusqlite::params![staged_filename, source_url, title, timestamp],
+            )
+            .expect("web staging metadata categories");
+        vault
+            .conn()
+            .execute(
                 "INSERT INTO web_sources
                  (artifact_version_id, source_url, final_url, title, published_at, fetched_at)
                  VALUES (?1, ?2, ?2, ?3, ?4, ?4)",
                 rusqlite::params![version.id, source_url, title, timestamp],
             )
             .expect("web metadata categories");
+
+        let derived_blob = vault
+            .blobs()
+            .put(vault.dek().expect("DEK"), derived_content.as_bytes())
+            .expect("derived blob");
+        let summary_blob = vault
+            .blobs()
+            .put(vault.dek().expect("DEK"), summary_content.as_bytes())
+            .expect("summary blob");
+        let thumbnail_blob = vault
+            .blobs()
+            .put(vault.dek().expect("DEK"), thumbnail_content.as_bytes())
+            .expect("thumbnail blob");
+        let ocr_blob = vault
+            .blobs()
+            .put(vault.dek().expect("DEK"), ocr_content.as_bytes())
+            .expect("OCR blob");
+        let caption_blob = vault
+            .blobs()
+            .put(vault.dek().expect("DEK"), caption_content.as_bytes())
+            .expect("caption blob");
+        let conversation_blob = vault
+            .blobs()
+            .put(vault.dek().expect("DEK"), conversation_content.as_bytes())
+            .expect("conversation blob");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO derived_text
+                 (id, artifact_version_id, blob_hash, extractor, extractor_version, created_at)
+                 VALUES (?1, ?2, ?3, 'private-extractor-sentinel', 'private-extractor-v1', ?4)",
+                rusqlite::params![derived_text_id, version.id, derived_blob.0, timestamp],
+            )
+            .expect("derived metadata");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO summaries
+                 (id, artifact_version_id, blob_hash, summarizer, summarizer_version,
+                  locality, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'private-summarizer-sentinel',
+                         'private-summarizer-v1', 'local', ?4, ?4)",
+                rusqlite::params![summary_id, version.id, summary_blob.0, timestamp],
+            )
+            .expect("summary metadata");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO provenance
+                 (id, derived_blob_hash, source_artifact_version_id, tool,
+                  tool_version, locality, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'PRIVATE-PROVENANCE-VERSION-SENTINEL-ISSUE50',
+                         'local', ?5)",
+                rusqlite::params![
+                    provenance_id,
+                    derived_blob.0,
+                    version.id,
+                    provenance_tool,
+                    timestamp
+                ],
+            )
+            .expect("provenance metadata");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO image_derivations
+                 (id, artifact_version_id, searchable_derived_text_id,
+                  thumbnail_blob_hash, thumbnail_media_type, ocr_blob_hash,
+                  caption_blob_hash, thumbnail_tool, thumbnail_tool_version,
+                  ocr_tool, ocr_tool_version, caption_tool, caption_model,
+                  caption_model_version, locality, cloud_opt_in, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'image/png', ?5, ?6,
+                         'private-thumbnail-tool', 'private-thumbnail-v1',
+                         'private-ocr-tool', 'private-ocr-v1',
+                         'private-caption-tool', ?7, ?8, 'local', 0, ?9)",
+                rusqlite::params![
+                    image_derivation_id,
+                    version.id,
+                    derived_text_id,
+                    thumbnail_blob.0,
+                    ocr_blob.0,
+                    caption_blob.0,
+                    model_name,
+                    model_version,
+                    timestamp
+                ],
+            )
+            .expect("image metadata");
         vault
             .conn()
             .execute(
@@ -968,10 +1153,16 @@ mod tests {
                  (id, source_artifact_version_id, schema_version, source_product,
                   source_hash, normal_form_blob_hash, parser_name, parser_version,
                   normalizer_name, normalizer_version, locality, processed_at)
-                 VALUES ('private-archive-inventory', ?1, '1.0.0', 'claude_code',
-                         ?2, ?2, 'synthetic-parser', '1', 'synthetic-normalizer',
-                         '1', 'local', ?3)",
-                rusqlite::params![version.id, version.blob_hash, timestamp],
+                 VALUES (?1, ?2, '1.0.0', 'claude_code',
+                         ?3, ?4, 'synthetic-parser', '1', 'synthetic-normalizer',
+                         '1', 'local', ?5)",
+                rusqlite::params![
+                    archive_id,
+                    version.id,
+                    version.blob_hash,
+                    conversation_blob.0,
+                    timestamp
+                ],
             )
             .expect("conversation archive");
         vault
@@ -981,11 +1172,181 @@ mod tests {
                  (id, archive_id, artifact_version_id, source_conversation_id,
                   source_created_at, source_updated_at, selected_branch_endpoint_id,
                   canonical_hash, created_at)
-                 VALUES (?1, 'private-archive-inventory', ?2, ?1, ?3, ?3,
-                         'private-node-inventory', 'private-canonical-inventory', ?3)",
-                rusqlite::params![conversation_id, version.id, timestamp],
+                 VALUES (?1, ?2, ?3, ?1, ?4, ?4,
+                         ?5, 'PRIVATE-CANONICAL-HASH-SENTINEL-ISSUE50', ?4)",
+                rusqlite::params![conversation_id, archive_id, version.id, timestamp, node_id],
             )
             .expect("conversation");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_source_records
+                 (id, conversation_id, source_record_id, record_index, source_id,
+                  byte_start, byte_end, line_start, line_end)
+                 VALUES (?1, ?2, ?1, 0, 'PRIVATE-SOURCE-NATIVE-ID-SENTINEL-ISSUE50',
+                         0, 64, 1, 1)",
+                rusqlite::params![source_record_id, conversation_id],
+            )
+            .expect("conversation source record");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_nodes
+                 (id, conversation_id, source_node_id, role, source_state,
+                  source_timestamp, selected_order)
+                 VALUES (?1, ?2, ?1, 'assistant', 'visible', ?3, 0)",
+                rusqlite::params![node_id, conversation_id, timestamp],
+            )
+            .expect("conversation node");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_node_source_records (node_id, source_record_id)
+                 VALUES (?1, ?2)",
+                rusqlite::params![node_id, source_record_id],
+            )
+            .expect("conversation node source link");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_content_parts
+                 (id, node_id, source_part_id, part_index, kind, attachment_id,
+                  attachment_state, attachment_hash)
+                 VALUES (?1, ?2, ?1, 0, 'attachment', ?3, 'preserved', ?4)",
+                rusqlite::params![part_id, node_id, attachment_id, attachment_hash],
+            )
+            .expect("conversation content part");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO derived_text
+                 (id, artifact_version_id, blob_hash, extractor, extractor_version, created_at)
+                 VALUES (?1, ?2, ?3, 'private-conversation-renderer',
+                         'private-conversation-renderer-v1', ?4)",
+                rusqlite::params![
+                    conversation_derived_id,
+                    version.id,
+                    conversation_blob.0,
+                    timestamp
+                ],
+            )
+            .expect("conversation derived text");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_derivations
+                 (id, conversation_id, derived_text_id, normalized_blob_hash,
+                  derivation_hash, renderer_name, renderer_version, chunker_name,
+                  chunker_version, target_tokens, overlap_tokens, locality, processed_at)
+                 VALUES (?1, ?2, ?3, ?4,
+                         'PRIVATE-DERIVATION-HASH-SENTINEL-ISSUE50',
+                         'private-renderer', 'private-renderer-v1',
+                         'private-chunker', 'private-chunker-v1', 128, 16, 'local', ?5)",
+                rusqlite::params![
+                    conversation_derivation_id,
+                    conversation_id,
+                    conversation_derived_id,
+                    conversation_blob.0,
+                    timestamp
+                ],
+            )
+            .expect("conversation derivation");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_spans
+                 (id, derivation_id, node_id, part_id, byte_offset_start, byte_offset_end)
+                 VALUES ('PRIVATE-CONVERSATION-SPAN-SENTINEL-ISSUE50', ?1, ?2, ?3, 0, ?4)",
+                rusqlite::params![
+                    conversation_derivation_id,
+                    node_id,
+                    part_id,
+                    conversation_content.len() as i64
+                ],
+            )
+            .expect("conversation span");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO chunks
+                 (id, derived_text_id, chunk_index, byte_offset_start, byte_offset_end,
+                  token_count, content_hash, section_heading, created_at)
+                 VALUES (?1, ?2, 0, 0, ?3, 8,
+                         'PRIVATE-CONVERSATION-CHUNK-HASH-SENTINEL-ISSUE50',
+                         'PRIVATE-CONVERSATION-HEADING-SENTINEL-ISSUE50', ?4)",
+                rusqlite::params![
+                    conversation_chunk_id,
+                    conversation_derived_id,
+                    conversation_content.len() as i64,
+                    timestamp
+                ],
+            )
+            .expect("conversation chunk");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_chunk_map
+                 (chunk_id, derivation_id, first_node_id, last_node_id,
+                  branch_endpoint_node_id, mapped_at)
+                 VALUES (?1, ?2, ?3, ?3, ?3, ?4)",
+                rusqlite::params![
+                    conversation_chunk_id,
+                    conversation_derivation_id,
+                    node_id,
+                    timestamp
+                ],
+            )
+            .expect("conversation chunk map");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_ingestion_runs
+                 (id, source_artifact_version_id, target_space_id, source_product,
+                  source_hash, parser_name, parser_version, normalizer_name,
+                  normalizer_version, status, discovered_count, failed_count,
+                  checkpoint_ordinal, retry_count, error_code, safe_error_summary,
+                  started_at, updated_at, completed_at, source_export_id)
+                 VALUES (?1, ?2, ?3, 'claude_code', ?4,
+                         'private-run-parser', 'private-run-parser-v1',
+                         'private-run-normalizer', 'private-run-normalizer-v1',
+                         'failed', 1, 1, 1, 1,
+                         'PRIVATE-INGESTION-ERROR-CODE-SENTINEL-ISSUE50', ?5,
+                         ?6, ?6, ?6, ?7)",
+                rusqlite::params![
+                    ingestion_run_id,
+                    version.id,
+                    space.0,
+                    version.blob_hash,
+                    ingestion_error,
+                    timestamp,
+                    source_export_id
+                ],
+            )
+            .expect("conversation ingestion run");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_ingestion_items
+                 (id, run_id, ordinal, source_conversation_id, source_digest,
+                  status, persisted_conversation_id, derived_text_id,
+                  derivation_hash, embedding_model_version, error_code,
+                  safe_error_summary, retry_count, attempted_at, completed_at)
+                 VALUES (?1, ?2, 0, ?3,
+                         'PRIVATE-INGESTION-DIGEST-SENTINEL-ISSUE50', 'failed',
+                         ?3, ?4, 'PRIVATE-INGESTION-DERIVATION-SENTINEL-ISSUE50',
+                         ?5, 'PRIVATE-INGESTION-ITEM-CODE-SENTINEL-ISSUE50',
+                         ?6, 1, ?7, ?7)",
+                rusqlite::params![
+                    ingestion_item_id,
+                    ingestion_run_id,
+                    conversation_id,
+                    conversation_derived_id,
+                    model_version,
+                    ingestion_error,
+                    timestamp
+                ],
+            )
+            .expect("conversation ingestion item");
         vault
             .conn()
             .execute(
@@ -993,22 +1354,27 @@ mod tests {
                  (conversation_id, source_product, session_id, project, repository,
                   working_directory, git_branch, git_commit, source_file_identity,
                   models_json, source_created_at, source_updated_at)
-                 VALUES (?1, 'claude_code', ?2, ?3, ?4, '/private/synthetic',
-                         ?5, 'private-commit-inventory', 'private-source-file-inventory',
-                         '[\"private-inventory-model@v1\"]', ?6, ?6)",
+                 VALUES (?1, 'claude_code', ?2, ?3, ?4, ?5,
+                         ?6, ?7, ?8, ?9, ?10, ?10)",
                 rusqlite::params![
                     conversation_id,
                     live_session.id,
                     project,
                     repository,
+                    working_directory,
                     branch,
-                    timestamp
+                    git_commit,
+                    source_file,
+                    serde_json::json!([model_version]).to_string(),
+                    timestamp,
                 ],
             )
             .expect("conversation source metadata");
 
         let receipt_hash = receipt.self_hash.expect("receipt self hash");
         let protected_values = [
+            manifest_created_at,
+            manifest_extension,
             space_name,
             filename,
             title,
@@ -1016,22 +1382,82 @@ mod tests {
             "restricted",
             timestamp,
             source_url,
+            staged_filename,
             project,
             repository,
+            working_directory,
             branch,
+            git_commit,
+            source_file,
             session_purpose,
             pairing_agent,
             processing_error,
+            ingestion_error,
             oauth_client,
+            oauth_client_name,
+            oauth_redirect,
+            oauth_code_hash,
+            oauth_challenge,
+            oauth_token_hash,
             oauth_resource,
-            "private-oauth-token-hash-sentinel-issue50",
             conversation_id,
+            archive_id,
+            source_record_id,
+            node_id,
+            part_id,
+            attachment_id,
+            attachment_hash,
+            provenance_id,
+            provenance_tool,
+            derived_text_id,
+            summary_id,
+            image_derivation_id,
+            conversation_derived_id,
+            conversation_derivation_id,
+            conversation_chunk_id,
+            ingestion_run_id,
+            ingestion_item_id,
+            source_export_id,
             model_name,
+            model_version,
+            original_content,
+            derived_content,
+            summary_content,
+            thumbnail_content,
+            ocr_content,
+            caption_content,
+            conversation_content,
             "PRIVATE-RECEIPT-AGENT-ID-SENTINEL-ISSUE50",
+            "PRIVATE-PROVENANCE-VERSION-SENTINEL-ISSUE50",
+            "PRIVATE-SOURCE-NATIVE-ID-SENTINEL-ISSUE50",
+            "PRIVATE-CANONICAL-HASH-SENTINEL-ISSUE50",
+            "PRIVATE-DERIVATION-HASH-SENTINEL-ISSUE50",
+            "PRIVATE-CONVERSATION-SPAN-SENTINEL-ISSUE50",
+            "PRIVATE-CONVERSATION-CHUNK-HASH-SENTINEL-ISSUE50",
+            "PRIVATE-CONVERSATION-HEADING-SENTINEL-ISSUE50",
+            "PRIVATE-INGESTION-ERROR-CODE-SENTINEL-ISSUE50",
+            "PRIVATE-INGESTION-DIGEST-SENTINEL-ISSUE50",
+            "PRIVATE-INGESTION-DERIVATION-SENTINEL-ISSUE50",
+            "PRIVATE-INGESTION-ITEM-CODE-SENTINEL-ISSUE50",
+            "private-extractor-sentinel",
+            "private-summarizer-sentinel",
+            "private-thumbnail-tool",
+            "private-ocr-tool",
+            "private-caption-tool",
+            "private-renderer",
+            "private-chunker",
+            "private-run-parser",
+            "private-run-normalizer",
             &live_session.id,
             &pairing.id,
             &receipt_hash,
             &version.blob_hash,
+            &derived_blob.0,
+            &summary_blob.0,
+            &thumbnail_blob.0,
+            &ocr_blob.0,
+            &caption_blob.0,
+            &conversation_blob.0,
         ];
         let backup = directory.path().join("CompleteInventoryBackup.tessera");
         crate::recovery::backup(&vault, &backup).expect("protected backup");
@@ -1259,7 +1685,7 @@ mod tests {
         std::fs::write(path.join(MARKER_NAME), b"{not-json").expect("marker");
         assert!(matches!(
             migrate(&path, "migration-passphrase"),
-            Err(MetadataMigrationError::Json(_))
+            Err(MetadataMigrationError::InvalidState)
         ));
 
         std::fs::remove_file(path.join(MARKER_NAME)).expect("remove marker");
@@ -1308,7 +1734,7 @@ mod tests {
         std::fs::write(path.join(MARKER_NAME), b"{not-json").expect("malformed v3 marker");
         assert!(matches!(
             migrate(&path, "migration-passphrase"),
-            Err(MetadataMigrationError::Json(_))
+            Err(MetadataMigrationError::InvalidState)
         ));
         assert!(path.join(RETIRED_NAME).is_file());
     }

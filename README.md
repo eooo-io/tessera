@@ -174,10 +174,11 @@ Run `tessera inbox process --space <id>` after staging, then review the pending
 artifact normally. The requested/final URL, extracted title, publication date,
 and fetch time remain attached to the exact artifact version. Owner results and
 Guardian citations show the source URL only when metadata disclosure is
-allowed. URLs and web-source metadata are plaintext database metadata under the
-known v1 limitation tracked by #50. Fetched HTML exists only in a bounded
-temporary directory; the staged Markdown is encrypted before downstream
-extraction by the normal intake pipeline.
+allowed. In vault format v3, URLs and web-source metadata are inside the
+SQLCipher-protected database. Curl returns the bounded response body, status,
+and content type through an in-memory pipe without a named response or header
+file. The intentional staged Markdown remains plaintext in `inbox/` until the
+normal intake pipeline encrypts and removes it.
 
 ## Relevance minimization
 

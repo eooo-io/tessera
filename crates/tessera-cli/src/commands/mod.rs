@@ -1395,7 +1395,12 @@ pub fn execute(vault_path: PathBuf, command: Command) -> anyhow::Result<()> {
                 }
                 let pass = passphrase()?;
                 let report = Vault::migrate_metadata(&vault_path, &pass)
-                    .with_context(|| format!("migrating metadata at {}", vault_path.display()))?;
+                    .with_context(|| {
+                        format!(
+                            "migrating metadata at {}; preserve the bundle and offline copy, do not edit migration files, resolve the reported condition, and re-run metadata migrate --yes",
+                            vault_path.display()
+                        )
+                    })?;
                 if report.migrated {
                     println!(
                         "Metadata migration complete: format v3, {} blob(s) protected, source schema v{}.",

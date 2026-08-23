@@ -5,6 +5,9 @@
 //! provenance record. Re-running on an unchanged version with the same
 //! extractor version is a no-op returning the existing derivation.
 
+use std::io::Write;
+use std::process::Stdio;
+
 use thiserror::Error;
 
 use crate::artifact::{ArtifactError, ArtifactId};
@@ -71,6 +74,30 @@ fn extractor_for(media_type: &str) -> Option<(&'static str, String)> {
     }
 }
 
+fn run_pandoc(program: &std::ffi::OsStr, original: &[u8]) -> Result<String, ExtractError> {
+    // Keeping the decrypted original in the child-process pipe avoids a named
+    // plaintext working copy that could survive an abrupt process exit.
+    let mut child = std::process::Command::new(program)
+        .args(["-f", "docx", "-t", "markdown"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| ExtractError::ExtractionFailed("pandoc stdin was unavailable".into()))?
+        .write_all(original)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(ExtractError::ExtractionFailed(format!(
+            "pandoc: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn run_extractor(extractor: &str, original: &[u8]) -> Result<String, ExtractError> {
     match extractor {
         "passthrough" => Ok(String::from_utf8_lossy(original).into_owned()),
@@ -82,23 +109,7 @@ fn run_extractor(extractor: &str, original: &[u8]) -> Result<String, ExtractErro
                     "install pandoc for DOCX extraction".into(),
                 ));
             }
-            // pandoc cannot read docx from stdin reliably; use a temp file.
-            let dir = tempfile::TempDir::new()?;
-            crate::vault::permissions::directory(dir.path())?;
-            let input = dir.path().join("input.docx");
-            std::fs::write(&input, original)?;
-            crate::vault::permissions::file(&input)?;
-            let output = std::process::Command::new("pandoc")
-                .arg(&input)
-                .args(["-f", "docx", "-t", "markdown"])
-                .output()?;
-            if !output.status.success() {
-                return Err(ExtractError::ExtractionFailed(format!(
-                    "pandoc: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )));
-            }
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            run_pandoc(std::ffi::OsStr::new("pandoc"), original)
         }
         other => Err(ExtractError::ExtractionFailed(format!(
             "unknown extractor {other}"
@@ -378,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn docx_extracts_via_pandoc_when_available() {
+    fn docx_extracts_via_pandoc_stdin_without_plaintext_tempfile() {
         if !pandoc_available() {
             eprintln!("SKIP: pandoc not installed");
             return;
@@ -394,7 +405,6 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut child| {
-                use std::io::Write;
                 child
                     .stdin
                     .take()
@@ -410,5 +420,35 @@ mod tests {
         let derived = extract_text(&vault, &id).expect("extract").expect("text");
         let text = read_derived_text(&vault, &derived).expect("read");
         assert!(text.contains("Tessera docx body"), "got: {text:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pandoc_pipe_creates_no_named_plaintext_working_copy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("test program directory");
+        let program = directory.path().join("synthetic-pandoc");
+        std::fs::write(&program, b"#!/bin/sh\ncat\n").expect("write test program");
+        let mut permissions = std::fs::metadata(&program)
+            .expect("test program metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).expect("test program mode");
+
+        let sentinel = b"PRIVATE-DOCX-PIPE-SENTINEL-ISSUE50";
+        assert_eq!(
+            run_pandoc(program.as_os_str(), sentinel).expect("pipe"),
+            String::from_utf8_lossy(sentinel)
+        );
+        let entries = std::fs::read_dir(directory.path())
+            .expect("test directory")
+            .map(|entry| entry.expect("entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![program]);
+        assert!(!std::fs::read(&entries[0])
+            .expect("program bytes")
+            .windows(sentinel.len())
+            .any(|window| window == sentinel));
     }
 }

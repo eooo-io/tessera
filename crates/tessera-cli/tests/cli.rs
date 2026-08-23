@@ -58,6 +58,21 @@ fn metadata_migration_requires_confirmation_and_current_format_is_idempotent() {
         .assert()
         .success()
         .stdout(predicate::str::contains("already protected at format v3"));
+
+    std::fs::write(vault.join(".metadata-migration-v3"), b"{malformed")
+        .expect("inject malformed migration marker");
+    tessera(&vault)
+        .args(["metadata", "migrate", "--yes"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("preserve the bundle and offline copy")
+                .and(predicate::str::contains("do not edit migration files"))
+                .and(predicate::str::contains("re-run metadata migrate --yes"))
+                .and(predicate::str::contains(
+                    "metadata migration state is malformed",
+                )),
+        );
 }
 
 #[test]

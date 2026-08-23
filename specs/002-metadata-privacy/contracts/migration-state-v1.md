@@ -44,5 +44,8 @@
 
 - Success leaves format v3, no migration marker, no legacy blob containers,
   no plaintext database or sidecars, and a full evidence summary.
-- Failure reports the validated phase and retained authoritative state without
-  echoing metadata, keys, passphrases, or content.
+- Failure returns a bounded error class and stable recovery guidance without
+  echoing metadata, keys, passphrases, content, or unvalidated claims about
+  which file is authoritative. The fixed paths and marker are inspected by the
+  explicit retry path, which independently validates authority rather than
+  trusting a phase printed by a failed process.

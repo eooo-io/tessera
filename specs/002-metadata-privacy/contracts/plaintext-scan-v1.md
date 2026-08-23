@@ -2,7 +2,10 @@
 
 ## Fixture
 
-The scanner builds a disposable vault with unique synthetic sentinels for:
+The scanner builds a disposable vault with unique synthetic sentinels for the
+following categories. Schema-constrained enums such as sensitivity use an
+allowed token attached to a uniquely identified synthetic row rather than an
+invalid out-of-domain value:
 
 - manifest-private fields and model registry;
 - spaces, filenames, titles, tags, sensitivity, and timestamps;
@@ -15,7 +18,9 @@ The scanner builds a disposable vault with unique synthetic sentinels for:
 - conversation archive, node, part, attachment, provenance, and run metadata;
 - original, derived, summary, image, and conversation blob content and hashes;
 - synthetic representatives for database, blob, inbox, backup, and temporary
-  path classes. Focused fault tests exercise each real interrupted boundary.
+  path classes. Focused fault tests exercise each real interrupted boundary;
+  web and DOCX response/source bytes use bounded process pipes and create no
+  application-owned plaintext working file.
 
 The fixture MUST NOT read, copy, enumerate, or derive sentinels from an owner
 vault or private corpus.
@@ -29,7 +34,8 @@ vault or private corpus.
   BLAKE3 hashes, and category-specific normalized forms.
 - Inventory every file, directory, non-empty durable-file size, permission mode
   where supported, and recognized container class. Bind interrupted residue to
-  the focused blob, receipt, inbox, migration, backup, and external-tool tests.
+  the focused blob, receipt, inbox, migration, and backup tests, and bind the
+  no-named-plaintext external-tool boundary to web and DOCX process-pipe tests.
 - Permit only intentional inbox plaintext created by the fixture and the exact
   structural exposure listed in the threat model.
 - Treat any unexpected match as a test failure with a synthetic category and

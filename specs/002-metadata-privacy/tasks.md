@@ -27,9 +27,9 @@ contract before implementation.
 - [x] T005 [US1] Add failing keyed-address, cross-vault unlinkability, confirmation, container-version, relocation, tamper, orphan, and deduplication tests in `crates/tessera-core/src/blob/mod.rs`
 - [x] T006 [US1] Add a failing synthetic sentinel inventory and recursive locked-vault byte-and-path scanner in `crates/tessera-core/tests/metadata_privacy.rs`
 - [x] T007 [US2] Add failing new-vault, legacy-vault, repeated, interrupted, resumed, malformed, unsupported, and insufficient-space migration tests in `crates/tessera-core/src/vault/metadata.rs` and the existing manifest/vault suites
-- [x] T008 [US3] Add failing migrated backup, copy, restore, query, receipt verification, receipt continuation, diagnostics, and repair coverage in `crates/tessera-core/src/vault/metadata.rs` and the existing recovery suite
+- [x] T008 [US3] Add migrated backup, copy, restore, query, receipt verification, receipt continuation, diagnostics, repair, and cross-host artifact-interchange coverage in metadata, recovery, portability, and CI suites
 - [x] T009 [US1] Add failing Unix bundle, database, blob, receipt, inbox, migration, and temporary-file permission coverage in `crates/tessera-core/tests/metadata_privacy.rs` and migration fault tests
-- [x] T010 [US2] Add failing owner-confirmed migration and bounded error-output tests in `crates/tessera-cli/tests/cli.rs`
+- [x] T010 [US2] Add owner-confirmed migration, bounded error-output, and stable recovery-guidance tests in `crates/tessera-cli/tests/cli.rs` and migration unit tests
 
 **Checkpoint**: Every new test fails for the intended missing behavior, not a
 fixture or compilation defect.
@@ -52,7 +52,7 @@ structural and intentional inbox exposure.
 - [x] T016 [US1] Implement versioned blob container v2 and vault-keyed opaque filesystem addressing while retaining protected logical hashes in `crates/tessera-core/src/blob/mod.rs`
 - [x] T017 [US1] Require the unlocked key for blob existence and deletion and update affected diagnostics and tests in `crates/tessera-core/src/recovery.rs`, `crates/tessera-core/src/review/mod.rs`, and `crates/tessera-core/src/conversation/persistence.rs`
 - [x] T018 [US1] Apply restrictive portable bundle permissions and atomic private writes in `crates/tessera-core/src/vault/mod.rs`, `crates/tessera-core/src/vault/manifest.rs`, `crates/tessera-core/src/crypto/keys.rs`, `crates/tessera-core/src/blob/mod.rs`, and `crates/tessera-core/src/receipt/mod.rs`
-- [x] T019 [US1] Remove named web-body temporary files, bound in-memory fetches, harden required external-tool temporary paths, and clean abandoned inbox partials in `crates/tessera-core/src/web.rs`, `crates/tessera-core/src/extract/mod.rs`, and `crates/tessera-core/src/inbox/mod.rs`
+- [x] T019 [US1] Remove named web-response and DOCX-input temporary files, bound process-pipe transfers, and clean abandoned inbox partials in `crates/tessera-core/src/web.rs`, `crates/tessera-core/src/extract/mod.rs`, and `crates/tessera-core/src/inbox/mod.rs`
 
 **Checkpoint**: User Story 1 passes for newly created synthetic vaults.
 
@@ -71,7 +71,7 @@ queries, and diagnostics after each resumed completion.
 - [x] T021 [US2] Implement fixed-path migration state, distrustful phase validation, and exclusive entry checks in `crates/tessera-core/src/vault/metadata.rs`
 - [x] T022 [US2] Implement plaintext checkpoint, protected export, inventory comparison, protected selection, retired-source cleanup, and format commit in `crates/tessera-core/src/vault/metadata.rs` and `crates/tessera-core/src/db/mod.rs`
 - [x] T023 [US2] Refuse ordinary legacy or in-progress operation and expose the explicit owner-confirmed migration API in `crates/tessera-core/src/vault/mod.rs`
-- [x] T024 [US2] Add the `metadata migrate --yes` operation with safe phase reporting and recovery guidance in `crates/tessera-cli/src/commands/mod.rs`
+- [x] T024 [US2] Add the `metadata migrate --yes` operation with bounded output and recovery guidance in `crates/tessera-cli/src/commands/mod.rs`
 
 **Checkpoint**: New and migrated vaults satisfy the same protected format
 contract; every injected interruption resumes or fails closed with one

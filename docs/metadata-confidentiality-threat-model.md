@@ -169,7 +169,7 @@ rather than explicitly enforcing owner-only modes on every path.
 | Protected receipts | Existing encrypted/authenticated container plus encrypted database index | `rcpt_<ULID>` name, including its millisecond creation-time component; file count, size, prepared/final state, and filesystem time |
 | Inbox | Restrictive owner-only mode, atomic staging, bounded stale-partial cleanup | Intentional plaintext staging content and name until ingestion; forensic deletion limits |
 | Web fetch | Bounded body, HTTP status, and content type captured through one in-memory curl stream without a named body or header file | Process memory and pipe data while unlocked; network and endpoint observations |
-| Required external-tool input | Private temporary directory and owner-only file, prompt cleanup | Unlocked same-user/process access and forensic deletion limits |
+| DOCX external-tool input | Decrypted DOCX bytes stream to pandoc over a bounded process pipe; no application-owned named plaintext file | Unlocked same-user/process access to process memory and pipe data while extraction runs |
 | Backup | Keyed destination database and protected file copy | Same structural residuals as source plus backup name and provider history |
 | Migration and atomic residue | Fixed non-sensitive marker, authenticated staged containers, protected prepared database, one validated authoritative source | Fixed migration names; owner-derived inbox/backup temp prefixes; ULIDs in manifest, blob, and receipt temp names; staged/retired existence, sizes, and times; retired plaintext forensic residue after directory-entry removal |
 | Permissions | New directories/files are created owner-only on Unix; opening strips group/other bits while preserving deliberately removed owner bits; best portable effort elsewhere | Same-user processes retain owner authority; filesystem ACL/provider behavior may differ |
@@ -205,9 +205,10 @@ rather than explicitly enforcing owner-only modes on every path.
   Tessera-created backup. The black-box scanner separately classifies every
   visible file and directory against the structural allowlist.
 - Database WAL, blob/receipt prepared files, inbox partials, migration phases,
-  backup staging, and external-tool temp paths are covered by their focused
-  fault/permission tests; the evidence matrix does not pretend one fixture can
-  pause every operation at once.
+  and backup staging are covered by their focused fault/permission tests. The
+  DOCX test exercises pandoc stdin, and code review verifies there is no named
+  application plaintext path; the evidence matrix does not pretend one fixture
+  can pause every operation at once.
 - Confirmation tests compare at least 100 known candidate public hashes and
   legacy paths, including one present document, against locked bytes and paths.
 - Migration fault tests inject interruption after every durable phase and
@@ -218,5 +219,8 @@ rather than explicitly enforcing owner-only modes on every path.
 - Ignored controlled tests record storage, migration, query, backup, restore,
   diagnostic, and repair timings and variance.
 - Exact-head macOS and Ubuntu CI prove the supported platform build and test
-  boundary. They do not prove provider-specific deletion or private-corpus
-  quality.
+  boundary. A chained workflow additionally transfers a macOS-created
+  protected backup to Ubuntu, then an Ubuntu-created backup back to macOS, and
+  verifies unlock, diagnostics, receipts, query, and source identity on each
+  receiving host. It does not prove provider-specific deletion or
+  private-corpus quality.

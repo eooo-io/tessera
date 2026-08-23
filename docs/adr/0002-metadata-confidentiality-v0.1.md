@@ -45,9 +45,9 @@ Tessera vault format v3 will:
    staged SQLCipher export, complete validation, fixed same-directory selection,
    protected legacy-receipt conversion, resumable phases, and cleanup only
    after format-v3 commit;
-8. avoid named web-response body files, clean bounded inbox partial residue,
-   use private temporary paths only when an external tool requires a filename,
-   and explicitly enforce owner-only directory and file modes on Unix;
+8. avoid named web-response and DOCX-input plaintext files by using bounded
+   process pipes, clean bounded inbox partial residue, and explicitly enforce
+   owner-only directory and file modes on Unix;
 9. preserve existing logical database schema and unlocked domain behavior
    except for the encrypted metadata registry and connection keying.
 
@@ -210,7 +210,8 @@ finding outside this set reopens the decision and requires owner review.
 - An independent reviewer challenges inventory completeness, confirmation
   resistance, key separation, migration atomicity, portability, data loss,
   temporary files, and claim boundaries on the exact final commit.
-- macOS and Ubuntu CI pass on that exact pushed commit.
+- macOS and Ubuntu CI pass on that exact pushed commit, including protected
+  bundle artifact interchange from macOS to Ubuntu and Ubuntu back to macOS.
 
 ## References
 
