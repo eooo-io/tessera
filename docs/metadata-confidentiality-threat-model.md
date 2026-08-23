@@ -35,8 +35,9 @@ an unlocked owner process are separate concerns.
 ## Trust boundaries
 
 - The vault data-encryption key is trusted after a keyslot authenticates.
-- Domain-separated database, blob-address, receipt-encryption, and
-  receipt-authentication keys are trusted only inside the unlocked process.
+- Domain-separated database, blob-address, TSB2 blob-encryption,
+  receipt-encryption, and receipt-authentication keys are trusted only inside
+  the unlocked process.
 - The public manifest, filesystem names, migration marker, database files,
   blob files, receipt files, inbox, backups, and all sidecars are attacker
   controlled while locked.
@@ -165,13 +166,13 @@ rather than explicitly enforcing owner-only modes on every path.
 | Logical plaintext hashes and dedup relationships | Retained inside protected database and protected receipts | None of the logical hashes |
 | Blob filesystem address | Vault-keyed opaque token; authenticated v2 container binds token | Opaque token, shard, count, ciphertext size, modification time |
 | Public manifest | Creation time, model registry, and private extensions moved to encrypted `vault_metadata` | Format version and portable public crypto/KDF parameters |
-| Protected receipts | Existing encrypted/authenticated container plus encrypted database index | Opaque receipt id, file count, size, prepared/final state, filesystem time |
+| Protected receipts | Existing encrypted/authenticated container plus encrypted database index | `rcpt_<ULID>` name, including its millisecond creation-time component; file count, size, prepared/final state, and filesystem time |
 | Inbox | Restrictive owner-only mode, atomic staging, bounded stale-partial cleanup | Intentional plaintext staging content and name until ingestion; forensic deletion limits |
-| Web fetch | Bounded response captured without a named body file | Process memory and pipe data while unlocked; network and endpoint observations |
+| Web fetch | Bounded body, HTTP status, and content type captured through one in-memory curl stream without a named body or header file | Process memory and pipe data while unlocked; network and endpoint observations |
 | Required external-tool input | Private temporary directory and owner-only file, prompt cleanup | Unlocked same-user/process access and forensic deletion limits |
 | Backup | Keyed destination database and protected file copy | Same structural residuals as source plus backup name and provider history |
-| Migration | Fixed non-sensitive marker, authenticated staged containers, protected prepared database, one validated authoritative source | Phase enum, staged/retired file existence, sizes and times; retired plaintext forensic residue after directory-entry removal |
-| Permissions | Directories owner-only and regular files owner-read/write on Unix; best portable effort elsewhere | Same-user processes retain owner authority; filesystem ACL/provider behavior may differ |
+| Migration and atomic residue | Fixed non-sensitive marker, authenticated staged containers, protected prepared database, one validated authoritative source | Fixed migration names; owner-derived inbox/backup temp prefixes; ULIDs in manifest, blob, and receipt temp names; staged/retired existence, sizes, and times; retired plaintext forensic residue after directory-entry removal |
+| Permissions | New directories/files are created owner-only on Unix; opening strips group/other bits while preserving deliberately removed owner bits; best portable effort elsewhere | Same-user processes retain owner authority; filesystem ACL/provider behavior may differ |
 
 ## Security invariants
 
@@ -179,8 +180,9 @@ rather than explicitly enforcing owner-only modes on every path.
    backup, diagnostic, migration, and reopened Guardian connections.
 2. Wrong key, plaintext-at-v3-path, malformed page, or unsupported format never
    falls through to empty-database creation.
-3. Database and blob-address keys are domain-separated from the DEK and receipt
-   keys and are never serialized.
+3. Database, blob-address, TSB2 blob-encryption, receipt-encryption, and
+   receipt-authentication keys use distinct derivation domains and are never
+   serialized. Direct-DEK blob decryption is confined to the legacy reader.
 4. Public blob paths cannot be computed from candidate content without the
    vault key. The same content in different vaults has different paths.
 5. Logical content hashes remain protected and continue to authenticate
@@ -198,9 +200,14 @@ rather than explicitly enforcing owner-only modes on every path.
 
 - Unit tests cover key separation, database key order, wrong-key behavior,
   keyed paths, container authentication, manifest minimization, and permissions.
-- Integration tests construct synthetic values for every field category,
-  create WAL and interrupted residue, close all handles, and recursively scan
-  the complete bundle and a Tessera-created backup.
+- A crate-level synthetic fixture populates every protected metadata category,
+  closes all handles, and recursively scans the complete bundle and a
+  Tessera-created backup. The black-box scanner separately classifies every
+  visible file and directory against the structural allowlist.
+- Database WAL, blob/receipt prepared files, inbox partials, migration phases,
+  backup staging, and external-tool temp paths are covered by their focused
+  fault/permission tests; the evidence matrix does not pretend one fixture can
+  pause every operation at once.
 - Confirmation tests compare at least 100 known candidate public hashes and
   legacy paths, including one present document, against locked bytes and paths.
 - Migration fault tests inject interruption after every durable phase and

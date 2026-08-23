@@ -66,7 +66,8 @@ impl BlobStore {
 
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce);
-        let cipher = XChaCha20Poly1305::new(dek.as_bytes().into());
+        let encryption_key = dek.blob_encryption_key_v2();
+        let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
         let sealed = cipher
             .encrypt(
                 XNonce::from_slice(&nonce),
@@ -285,7 +286,8 @@ fn decrypt_v2_container(
     }
     let nonce_start = CONTAINER_MAGIC.len();
     let sealed_start = nonce_start + NONCE_LEN;
-    let cipher = XChaCha20Poly1305::new(dek.as_bytes().into());
+    let encryption_key = dek.blob_encryption_key_v2();
+    let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&container[nonce_start..sealed_start]),

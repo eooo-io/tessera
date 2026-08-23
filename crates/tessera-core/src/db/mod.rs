@@ -93,7 +93,8 @@ pub fn open_database(path: &Path, dek: &Dek) -> Result<Connection, DbError> {
     open_encrypted_database(path, &key)
 }
 
-/// Open or create a SQLCipher-protected database with a raw 256-bit key.
+/// Open or create a SQLCipher-protected database with a 256-bit high-entropy
+/// secret.
 ///
 /// The key is installed before the first database read. Existing files are
 /// immediately read to prove the key and format before any mutating PRAGMA or

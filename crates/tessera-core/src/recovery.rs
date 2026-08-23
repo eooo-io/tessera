@@ -84,6 +84,8 @@ pub enum RecoveryError {
     ActiveSessions(usize),
     #[error("backup refused because source diagnostics contain fatal integrity findings")]
     SourceFatal,
+    #[error("backup destination failed post-copy integrity verification")]
+    DestinationFatal,
     #[error("derived rebuild refused because diagnostics contain fatal integrity findings")]
     RebuildFatal,
 }
@@ -282,7 +284,7 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
     let orphaned_derivations = crate::provenance::orphaned_derivations(vault)
         .map(|items| items.len())
         .unwrap_or(1);
-    let receipt_failure = crate::receipt::verify(vault).is_err() as usize;
+    let receipt_failure = crate::receipt::verify_for_diagnostics(vault).is_err() as usize;
 
     let mut checks = vec![
         check(
@@ -519,6 +521,11 @@ pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
         destination_db.close().map_err(|(_, error)| error)?;
         std::fs::File::open(staging.join("vault.db"))?.sync_all()?;
         std::fs::File::open(&staging)?.sync_all()?;
+        let verified = Vault::open_with_dek(&staging, vault.dek()?.duplicate())?;
+        if diagnose(&verified)?.has_fatal() {
+            return Err(RecoveryError::DestinationFatal);
+        }
+        drop(verified);
         Ok(())
     })();
     let _ = barrier.execute_batch("ROLLBACK");
@@ -969,6 +976,40 @@ mod tests {
         let error = backup(&vault, &dir.path().join("Blocked.tessera"))
             .expect_err("active backup must fail");
         assert!(matches!(error, RecoveryError::ActiveSessions(1)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_backup_removes_private_staging_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, vault, _artifact_id) = vault_with_original();
+        let external = dir.path().join("external-plaintext.txt");
+        std::fs::write(&external, b"synthetic external content").expect("external fixture");
+        let injected = vault.path().join("inbox/unsafe-link");
+        symlink(&external, &injected).expect("inject source symlink");
+        let destination = dir.path().join("MustNotComplete.tessera");
+
+        assert!(backup(&vault, &destination).is_err());
+        assert!(!destination.exists());
+        assert!(injected.is_symlink());
+        let staging_prefix = format!(
+            ".{}.backup-staging-",
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("destination name")
+        );
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("backup parent")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&staging_prefix)),
+            "failed backup left a staging bundle"
+        );
     }
 
     #[test]

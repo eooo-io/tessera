@@ -79,8 +79,8 @@ writer does not echo them into the locked-visible manifest.
 ## 3. `vault.db`
 
 SQLCipher 4 database in WAL mode with foreign keys enforced. Every database,
-journal, and WAL page is protected under a raw 256-bit key derived from the
-vault DEK with context `tessera database encryption key v1`. The build uses
+journal, and WAL page is protected under a 256-bit high-entropy secret derived
+from the vault DEK with context `tessera database encryption key v1`. The build uses
 SQLCipher's authenticated page format and forces SQLite temporary storage to
 memory. Schema is defined by ordered append-only migrations in
 `tessera-core/src/db/migrations/` and recorded in `schema_migrations`.
@@ -255,6 +255,10 @@ logical hash with a key derived using `tessera blob address key v1`, stored at
 `blobs/<first two address chars>/<full opaque address>`. The same content in
 two vaults therefore has different locked-visible addresses.
 
+TSB2 payload encryption uses a separate 256-bit key derived from the vault DEK
+under `tessera blob encryption key v2`. Direct-DEK blob decryption exists only
+for authenticated legacy TSB1 migration.
+
 On-disk container framing:
 
 ```
@@ -279,6 +283,10 @@ from the vault DEK. The logical JSON schema remains
 `spec/receipt.schema.json` for owner review and explicit plaintext export; JSON
 is not the format-v2 at-rest representation.
 
+Current receipt ids are `rcpt_<ULID>`. The ULID is opaque with respect to
+receipt content but encodes its millisecond generation time in the visible
+filename; this is an explicit format-v3 traffic-analysis residual.
+
 Each finalized receipt embeds its contiguous `seq`, the keyed BLAKE3 token of
 the previous finalized receipt (`prev_receipt_hash`), and a keyed BLAKE3 token
 over its own canonical JSON with `self_hash` cleared. The authentication key is
@@ -302,8 +310,8 @@ offset  size  field
 
 AAD is `TSR1`, followed by the receipt-id byte length as a little-endian `u32`,
 followed by the UTF-8 receipt id. A container copied under another receipt id
-therefore fails authentication. Receipt count, container sizes, opaque receipt
-ids in filenames, filesystem timestamps, and access patterns remain visible
+therefore fails authentication. Receipt count, container sizes, ULID-based
+receipt ids and their millisecond generation times, filesystem timestamps, and access patterns remain visible
 through the directory. Sequence positions, chain tokens, logical timestamps,
 policy, pairings, sessions, and receipt indexes are protected inside SQLCipher
 and the receipt containers.

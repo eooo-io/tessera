@@ -88,6 +88,15 @@ impl Dek {
         ))
     }
 
+    /// Domain-separated key for format-v2 blob payload encryption.
+    /// Legacy format-v1 blobs retain direct-DEK decryption only for migration.
+    pub(crate) fn blob_encryption_key_v2(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera blob encryption key v2",
+            &self.bytes,
+        ))
+    }
+
     /// Domain-separated key for protected receipt containers. This key is
     /// derived on demand, never serialized, and zeroized when dropped.
     pub(crate) fn receipt_encryption_key(&self) -> Zeroizing<[u8; 32]> {

@@ -1,8 +1,8 @@
 //! The `tessera.json` manifest — the vault bundle's portability contract.
 //!
-//! Carries everything a fresh guardian on a new machine needs to interpret
-//! the bundle: format version, crypto parameters, and the registry of
-//! embedding models used. See `spec/vault-format.md`.
+//! The locked-visible v3 file carries only format and public crypto parameters.
+//! Creation time, model registry, and preserved private extensions live in the
+//! protected database. See `spec/vault-format.md`.
 
 use std::io::Write;
 use std::path::Path;

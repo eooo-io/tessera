@@ -3,7 +3,7 @@
 ## Decision 1: Protect the complete SQLite store with SQLCipher
 
 **Decision**: Use the existing `rusqlite` integration with its bundled
-SQLCipher and vendored OpenSSL feature. Derive a raw 256-bit database key from
+SQLCipher and vendored OpenSSL feature. Derive a 256-bit high-entropy database secret from
 the vault data key with the context `tessera database encryption key v1`. Key
 every connection before its first database read, verify the key immediately,
 keep write-ahead logging, and force non-transaction temporary stores to memory.
@@ -122,8 +122,9 @@ standard SQLite database instead of `rekey`.
 **Decision**: Capture bounded web response bytes through a pipe rather than a
 named body file. Use private runtime directories and restrictive files only
 where an external program requires a path. Clean abandoned inbox partials at a
-defined recovery boundary, set bundle directories to owner-only and regular
-files to owner-read/write on Unix, and document that same-user malware,
+defined recovery boundary, strip all group/other permissions from bundle
+directories and regular files on Unix without restoring owner bits that an
+operator deliberately removed, and document that same-user malware,
 snapshots, SSD remapping, journaling filesystems, and providers can defeat
 deletion expectations.
 

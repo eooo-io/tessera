@@ -115,12 +115,23 @@ fn protected_storage_query_backup_and_repair_measurements() {
     let backup_started = Instant::now();
     recovery::backup(&vault, &backup_path).expect("backup");
     let backup_ms = backup_started.elapsed().as_millis();
+    let restore_started = Instant::now();
+    let restored = Vault::open(&backup_path, "performance-passphrase").expect("restore open");
+    let restored_diagnostics = recovery::diagnose(&restored).expect("restore diagnostics");
+    assert!(!restored_diagnostics.has_fatal());
+    assert_eq!(
+        tessera_core::receipt::verify(&restored).expect("restore receipts"),
+        0
+    );
+    let restore_ms = restore_started.elapsed().as_millis();
+    drop(restored);
     let storage_bytes = tree_bytes(&vault_path);
     let backup_bytes = tree_bytes(&backup_path);
 
     println!(
         "metadata_performance_v1 create_ms={create_ms} ingest_100_ms={ingest_ms} \
          query_top10_us={query_us} diagnostics_ms={diagnostics_ms} repair_ms={repair_ms} \
-         backup_ms={backup_ms} storage_bytes={storage_bytes} backup_bytes={backup_bytes}"
+         backup_ms={backup_ms} restore_ms={restore_ms} storage_bytes={storage_bytes} \
+         backup_bytes={backup_bytes}"
     );
 }

@@ -78,6 +78,7 @@ enum MigrationFailpoint {
     AfterBlobs,
     AfterPrepare,
     BeforeExportStorageFull,
+    AfterRetire,
     AfterSelect,
     AfterManifest,
 }
@@ -195,6 +196,7 @@ pub(crate) fn register_embedding_model(
 
 pub(crate) fn migration_in_progress(path: &Path) -> bool {
     path.join(MARKER_NAME).exists()
+        || path.join(MARKER_TEMP_NAME).exists()
         || path.join(PREPARED_NAME).exists()
         || path.join(RETIRED_NAME).exists()
 }
@@ -222,9 +224,8 @@ fn migrate_at(
 
     if manifest.format_version == FORMAT_VERSION {
         if !resumed {
+            validate_protected_state(path, &path.join("vault.db"), &manifest, &dek)?;
             let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
-            validate_database(&conn)?;
-            hydrate_manifest(&conn, &mut manifest)?;
             return Ok(MetadataMigrationReport {
                 migrated: false,
                 resumed: false,
@@ -232,25 +233,52 @@ fn migrate_at(
                 source_schema_version: crate::db::migrations::schema_version(&conn)?,
             });
         }
+        if !marker_path.is_file() || path.join(PREPARED_NAME).exists() {
+            return Err(MetadataMigrationError::InvalidState);
+        }
+        let marker = load_marker_or_default(path)?;
+        if marker.version != FORMAT_VERSION
+            || !matches!(
+                marker.phase,
+                MigrationPhase::DatabaseSelected | MigrationPhase::ManifestCommitted
+            )
+        {
+            return Err(MetadataMigrationError::InvalidState);
+        }
         let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
         validate_database(&conn)?;
         hydrate_manifest(&conn, &mut manifest)?;
+        let source_schema_version = if path.join(RETIRED_NAME).is_file() {
+            let retired = crate::db::open_plaintext_database(&path.join(RETIRED_NAME))?;
+            validate_database(&retired)?;
+            compare_logical_inventory(&retired, &conn)?;
+            crate::db::migrations::schema_version(&retired)?
+        } else {
+            crate::db::migrations::schema_version(&conn)?
+        };
         drop(conn);
+        validate_protected_state(path, &path.join("vault.db"), &manifest, &dek)?;
         remove_if_exists(&path.join(PREPARED_NAME))?;
         remove_database_and_sidecars(&path.join(RETIRED_NAME))?;
         remove_if_exists(&marker_path)?;
+        remove_if_exists(&path.join(MARKER_TEMP_NAME))?;
         sync_directory(path)?;
         return Ok(MetadataMigrationReport {
             migrated: false,
             resumed: true,
             converted_blobs: 0,
-            source_schema_version: crate::db::migrations::migration_count() as u32,
+            source_schema_version,
         });
     }
     if manifest.format_version == 0 || manifest.format_version > 2 {
         return Err(MetadataMigrationError::NotLegacy);
     }
 
+    if !marker_path.is_file()
+        && (path.join(PREPARED_NAME).exists() || path.join(RETIRED_NAME).exists())
+    {
+        return Err(MetadataMigrationError::InvalidState);
+    }
     let marker = load_marker_or_default(path)?;
     if marker.version != FORMAT_VERSION {
         return Err(MetadataMigrationError::InvalidState);
@@ -260,17 +288,23 @@ fn migrate_at(
     let prepared = path.join(PREPARED_NAME);
     let retired = path.join(RETIRED_NAME);
     let database_key = dek.database_encryption_key();
-    let preflight = match crate::db::open_encrypted_database(&database, &database_key) {
-        Ok(connection) => connection,
-        Err(_) if database.is_file() && !retired.exists() => {
-            crate::db::open_plaintext_database(&database)?
+    let preflight = if database.is_file() {
+        match crate::db::open_encrypted_database(&database, &database_key) {
+            Ok(connection) => connection,
+            Err(_) if !retired.exists() => crate::db::open_plaintext_database(&database)?,
+            Err(_) if retired.is_file() => crate::db::open_plaintext_database(&retired)?,
+            Err(_) => {
+                return Err(MetadataMigrationError::Validation(
+                    "no authoritative database is available for migration preflight".into(),
+                ));
+            }
         }
-        Err(_) if retired.is_file() => crate::db::open_plaintext_database(&retired)?,
-        Err(_) => {
-            return Err(MetadataMigrationError::Validation(
-                "no authoritative database is available for migration preflight".into(),
-            ));
-        }
+    } else if retired.is_file() {
+        crate::db::open_plaintext_database(&retired)?
+    } else {
+        return Err(MetadataMigrationError::Validation(
+            "no authoritative database is available for migration preflight".into(),
+        ));
     };
     validate_database(&preflight)?;
     let active = active_sessions(&preflight)?;
@@ -289,7 +323,16 @@ fn migrate_at(
         return Err(MetadataMigrationError::Interrupted("blob protection"));
     }
 
-    let selected = crate::db::open_encrypted_database(&database, &database_key).ok();
+    // Never call the create-capable protected opener for a missing selected
+    // path. A crash may have retired the legacy database but not yet renamed
+    // the validated candidate into place; that state must resume from the
+    // retained authority and prepared replacement, not manufacture an empty
+    // protected database.
+    let selected = if database.is_file() {
+        crate::db::open_encrypted_database(&database, &database_key).ok()
+    } else {
+        None
+    };
     let source_version;
     if let Some(selected) = selected {
         if !retired.is_file() {
@@ -298,7 +341,13 @@ fn migrate_at(
             ));
         }
         validate_database(&selected)?;
-        source_version = plaintext_schema_version(&retired)?;
+        let retained = crate::db::open_plaintext_database(&retired)?;
+        validate_database(&retained)?;
+        compare_logical_inventory(&retained, &selected)?;
+        source_version = crate::db::migrations::schema_version(&retained)?;
+        let mut protected_manifest = manifest.clone();
+        hydrate_manifest(&selected, &mut protected_manifest)?;
+        drop(retained);
         drop(selected);
     } else {
         let source_path = if database.is_file() {
@@ -357,6 +406,7 @@ fn migrate_at(
             candidate.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
             drop(candidate);
         }
+        validate_protected_state(path, &prepared, &manifest, &dek)?;
         save_marker(path, MigrationPhase::DatabasePrepared)?;
         if failpoint == MigrationFailpoint::AfterPrepare {
             return Err(MetadataMigrationError::Interrupted("database preparation"));
@@ -368,6 +418,11 @@ fn migrate_at(
             move_sidecar_if_present(&database, &retired, "-wal")?;
             move_sidecar_if_present(&database, &retired, "-shm")?;
             sync_directory(path)?;
+            if failpoint == MigrationFailpoint::AfterRetire {
+                return Err(MetadataMigrationError::Interrupted(
+                    "legacy database retirement",
+                ));
+            }
         }
         std::fs::rename(&prepared, &database)?;
         sync_directory(path)?;
@@ -455,6 +510,37 @@ fn write_marker(path: &Path, marker: &MigrationMarker) -> Result<(), MetadataMig
     Ok(())
 }
 
+fn validate_protected_state(
+    path: &Path,
+    database: &Path,
+    manifest: &VaultManifest,
+    dek: &crate::crypto::Dek,
+) -> Result<(), MetadataMigrationError> {
+    let conn = crate::db::open_database(database, dek)?;
+    validate_database(&conn)?;
+    let mut hydrated = manifest.clone();
+    hydrate_manifest(&conn, &mut hydrated)?;
+    let blobs = BlobStore::open(&path.join("blobs")).map_err(VaultError::from)?;
+    let candidate = super::Vault {
+        path: path.to_path_buf(),
+        manifest: hydrated,
+        conn,
+        blobs,
+        dek: Some(dek.duplicate()),
+    };
+    let integrity = crate::recovery::diagnose(&candidate).map_err(|_| {
+        MetadataMigrationError::Validation(
+            "protected candidate diagnostics could not complete".into(),
+        )
+    })?;
+    if integrity.has_fatal() {
+        return Err(MetadataMigrationError::Validation(
+            "protected candidate diagnostics contain fatal findings".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_database(conn: &Connection) -> Result<(), MetadataMigrationError> {
     let quick: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if quick != "ok" {
@@ -490,12 +576,6 @@ fn active_sessions(conn: &Connection) -> Result<usize, MetadataMigrationError> {
         |row| row.get(0),
     )?;
     Ok(count as usize)
-}
-
-fn plaintext_schema_version(path: &Path) -> Result<u32, MetadataMigrationError> {
-    let conn = crate::db::open_plaintext_database(path)?;
-    validate_database(&conn)?;
-    Ok(crate::db::migrations::schema_version(&conn)?)
 }
 
 fn logical_inventory(conn: &Connection) -> Result<BTreeMap<String, i64>, MetadataMigrationError> {
@@ -620,6 +700,34 @@ mod tests {
 
     struct MigrationEmbedder;
 
+    fn assert_locked_value_absent(root: &Path, value: &str) {
+        fn visit(root: &Path, path: &Path, value: &str) {
+            for entry in std::fs::read_dir(path).expect("read locked bundle") {
+                let entry = entry.expect("bundle entry");
+                let path = entry.path();
+                let relative = path.strip_prefix(root).expect("relative bundle path");
+                assert!(
+                    !relative.to_string_lossy().contains(value),
+                    "protected value leaked through path {}",
+                    relative.display()
+                );
+                if path.is_dir() {
+                    visit(root, &path, value);
+                } else {
+                    let bytes = std::fs::read(&path).expect("read locked file");
+                    assert!(
+                        !bytes
+                            .windows(value.len())
+                            .any(|window| window == value.as_bytes()),
+                        "protected value leaked through bytes in {}",
+                        relative.display()
+                    );
+                }
+            }
+        }
+        visit(root, root, value);
+    }
+
     impl EmbeddingProvider for MigrationEmbedder {
         fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
             let mut vector = vec![0.0; 384];
@@ -729,6 +837,211 @@ mod tests {
         assert!(!raw
             .windows("PRIVATE-MODEL-REGISTRY-SENTINEL".len())
             .any(|bytes| bytes == b"PRIVATE-MODEL-REGISTRY-SENTINEL"));
+    }
+
+    #[test]
+    fn complete_synthetic_metadata_category_inventory_is_absent_while_locked() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("CompleteInventory.tessera");
+        let vault =
+            super::super::Vault::create_with_params(&path, "inventory-passphrase", &TEST_PARAMS)
+                .expect("create protected vault");
+
+        let space_name = "PRIVATE-SPACE-CATEGORY-SENTINEL-ISSUE50";
+        let filename = "PRIVATE-FILENAME-CATEGORY-SENTINEL-ISSUE50.md";
+        let title = "PRIVATE-TITLE-CATEGORY-SENTINEL-ISSUE50";
+        let tag_name = "PRIVATE-TAG-CATEGORY-SENTINEL-ISSUE50";
+        let timestamp = "PRIVATE-TIMESTAMP-CATEGORY-SENTINEL-ISSUE50";
+        let source_url = "https://metadata.invalid/PRIVATE-SOURCE-URL-SENTINEL-ISSUE50";
+        let project = "PRIVATE-PROJECT-CATEGORY-SENTINEL-ISSUE50";
+        let repository = "PRIVATE-REPOSITORY-CATEGORY-SENTINEL-ISSUE50";
+        let branch = "PRIVATE-BRANCH-CATEGORY-SENTINEL-ISSUE50";
+        let session_purpose = "PRIVATE-SESSION-PURPOSE-SENTINEL-ISSUE50";
+        let pairing_agent = "PRIVATE-PAIRING-AGENT-SENTINEL-ISSUE50";
+        let processing_error = "PRIVATE-PROCESSING-ERROR-SENTINEL-ISSUE50";
+        let oauth_client = "PRIVATE-OAUTH-CLIENT-SENTINEL-ISSUE50";
+        let oauth_resource = "PRIVATE-OAUTH-RESOURCE-SENTINEL-ISSUE50";
+        let conversation_id = "PRIVATE-CONVERSATION-ID-SENTINEL-ISSUE50";
+        let model_name = "PRIVATE-MODEL-REGISTRY-SENTINEL-ISSUE50";
+        let content = b"PRIVATE-CONTENT-CATEGORY-SENTINEL-ISSUE50";
+
+        let space = crate::space::create(&vault, space_name, None).expect("space");
+        let (artifact, version) = crate::artifact::register_encrypted_bytes(
+            &vault,
+            &space,
+            filename,
+            "text/markdown",
+            crate::artifact::Sensitivity::Restricted,
+            content,
+        )
+        .expect("artifact");
+        crate::artifact::tag(&vault, &artifact, tag_name).expect("tag");
+        crate::review::record_processing_error(
+            &vault,
+            &artifact,
+            "metadata-inventory",
+            processing_error,
+        )
+        .expect("processing error");
+
+        let policy = crate::LensPolicy::new(
+            "PRIVATE-LENS-CATEGORY-SENTINEL-ISSUE50",
+            vec![space.clone()],
+        );
+        let lens_id = crate::lens::create(&vault, &policy).expect("lens");
+        let pairing = crate::pairing::approve(&vault, &lens_id, session_purpose, pairing_agent, 60)
+            .expect("pairing");
+        let live_session = crate::session::start(&vault, &pairing).expect("session");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO oauth_clients
+                 (client_id, client_name, redirect_uris_json, created_at)
+                 VALUES (?1, 'private OAuth client', '[\"https://oauth.invalid/callback\"]', ?2)",
+                rusqlite::params![oauth_client, timestamp],
+            )
+            .expect("OAuth client metadata");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO oauth_access_tokens
+                 (token_hash, client_id, pairing_id, lens_id, resource, created_at, expires_at)
+                 VALUES ('private-oauth-token-hash-sentinel-issue50', ?1, ?2, ?3, ?4, ?5, ?5)",
+                rusqlite::params![
+                    oauth_client,
+                    pairing.id,
+                    lens_id.0,
+                    oauth_resource,
+                    timestamp
+                ],
+            )
+            .expect("OAuth token metadata");
+        let receipt = crate::receipt::Session::open_bound(
+            &vault,
+            crate::receipt::AgentRef {
+                agent_id: "PRIVATE-RECEIPT-AGENT-ID-SENTINEL-ISSUE50".into(),
+                name: pairing_agent.into(),
+            },
+            &policy,
+            session_purpose,
+            false,
+            crate::receipt::SessionBinding {
+                session_id: live_session.id.clone(),
+                pairing_id: Some(pairing.id.clone()),
+            },
+        )
+        .expect("receipt session")
+        .finalize()
+        .expect("receipt finalization");
+        crate::session::close(&vault, &live_session.id, Some(&receipt.receipt_id))
+            .expect("close session");
+
+        register_embedding_model(
+            vault.conn(),
+            EmbeddingModelEntry {
+                name: model_name.into(),
+                version: "private-inventory-model@v1".into(),
+                dimensions: 384,
+            },
+        )
+        .expect("model registry");
+        vault
+            .conn()
+            .execute(
+                "UPDATE spaces SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![timestamp, space.0],
+            )
+            .expect("timestamp category");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO web_sources
+                 (artifact_version_id, source_url, final_url, title, published_at, fetched_at)
+                 VALUES (?1, ?2, ?2, ?3, ?4, ?4)",
+                rusqlite::params![version.id, source_url, title, timestamp],
+            )
+            .expect("web metadata categories");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_archives
+                 (id, source_artifact_version_id, schema_version, source_product,
+                  source_hash, normal_form_blob_hash, parser_name, parser_version,
+                  normalizer_name, normalizer_version, locality, processed_at)
+                 VALUES ('private-archive-inventory', ?1, '1.0.0', 'claude_code',
+                         ?2, ?2, 'synthetic-parser', '1', 'synthetic-normalizer',
+                         '1', 'local', ?3)",
+                rusqlite::params![version.id, version.blob_hash, timestamp],
+            )
+            .expect("conversation archive");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversations
+                 (id, archive_id, artifact_version_id, source_conversation_id,
+                  source_created_at, source_updated_at, selected_branch_endpoint_id,
+                  canonical_hash, created_at)
+                 VALUES (?1, 'private-archive-inventory', ?2, ?1, ?3, ?3,
+                         'private-node-inventory', 'private-canonical-inventory', ?3)",
+                rusqlite::params![conversation_id, version.id, timestamp],
+            )
+            .expect("conversation");
+        vault
+            .conn()
+            .execute(
+                "INSERT INTO conversation_source_metadata
+                 (conversation_id, source_product, session_id, project, repository,
+                  working_directory, git_branch, git_commit, source_file_identity,
+                  models_json, source_created_at, source_updated_at)
+                 VALUES (?1, 'claude_code', ?2, ?3, ?4, '/private/synthetic',
+                         ?5, 'private-commit-inventory', 'private-source-file-inventory',
+                         '[\"private-inventory-model@v1\"]', ?6, ?6)",
+                rusqlite::params![
+                    conversation_id,
+                    live_session.id,
+                    project,
+                    repository,
+                    branch,
+                    timestamp
+                ],
+            )
+            .expect("conversation source metadata");
+
+        let receipt_hash = receipt.self_hash.expect("receipt self hash");
+        let protected_values = [
+            space_name,
+            filename,
+            title,
+            tag_name,
+            "restricted",
+            timestamp,
+            source_url,
+            project,
+            repository,
+            branch,
+            session_purpose,
+            pairing_agent,
+            processing_error,
+            oauth_client,
+            oauth_resource,
+            "private-oauth-token-hash-sentinel-issue50",
+            conversation_id,
+            model_name,
+            "PRIVATE-RECEIPT-AGENT-ID-SENTINEL-ISSUE50",
+            &live_session.id,
+            &pairing.id,
+            &receipt_hash,
+            &version.blob_hash,
+        ];
+        let backup = directory.path().join("CompleteInventoryBackup.tessera");
+        crate::recovery::backup(&vault, &backup).expect("protected backup");
+        drop(vault);
+
+        for root in [&path, &backup] {
+            for value in protected_values {
+                assert_locked_value_absent(root, value);
+            }
+        }
     }
 
     #[test]
@@ -897,6 +1210,7 @@ mod tests {
         for failpoint in [
             MigrationFailpoint::AfterBlobs,
             MigrationFailpoint::AfterPrepare,
+            MigrationFailpoint::AfterRetire,
             MigrationFailpoint::AfterSelect,
             MigrationFailpoint::AfterManifest,
         ] {
@@ -963,6 +1277,107 @@ mod tests {
             migrate(&path, "migration-passphrase"),
             Err(MetadataMigrationError::ActiveSessions { count: 1 })
         ));
+    }
+
+    #[test]
+    fn v3_resume_validates_marker_and_protected_state_before_cleanup() {
+        let (_directory, path, hash) = legacy_fixture();
+        assert!(matches!(
+            migrate_at(
+                &path,
+                "migration-passphrase",
+                MigrationFailpoint::AfterManifest
+            ),
+            Err(MetadataMigrationError::Interrupted(_))
+        ));
+        let keyslots = KeyslotFile::load(&path.join("keyslot.bin")).expect("keyslots");
+        let dek = keyslots
+            .unlock("migration-passphrase")
+            .expect("unlock migration fixture");
+        BlobStore::open(&path.join("blobs"))
+            .expect("blob store")
+            .delete(&dek, &hash)
+            .expect("tamper protected original");
+        assert!(matches!(
+            migrate(&path, "migration-passphrase"),
+            Err(MetadataMigrationError::Validation(_))
+        ));
+        assert!(path.join(RETIRED_NAME).is_file());
+        assert!(path.join(MARKER_NAME).is_file());
+
+        std::fs::write(path.join(MARKER_NAME), b"{not-json").expect("malformed v3 marker");
+        assert!(matches!(
+            migrate(&path, "migration-passphrase"),
+            Err(MetadataMigrationError::Json(_))
+        ));
+        assert!(path.join(RETIRED_NAME).is_file());
+    }
+
+    #[test]
+    fn fatal_source_diagnostics_refuse_selection_and_preserve_legacy_authority() {
+        let (_directory, path, _hash) = legacy_fixture();
+        let conn = crate::db::open_plaintext_database(&path.join("vault.db")).expect("db");
+        conn.execute(
+            "INSERT INTO lenses (id, name, policy_json, created_at, updated_at)
+             VALUES ('invalid-lens', 'invalid', '{not-json', 'now', 'now')",
+            [],
+        )
+        .expect("fatal logical fault");
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint fault");
+        drop(conn);
+
+        assert!(matches!(
+            migrate(&path, "migration-passphrase"),
+            Err(MetadataMigrationError::Validation(_))
+        ));
+        assert!(path.join("vault.db").is_file());
+        assert!(!path.join(RETIRED_NAME).exists());
+        assert_eq!(
+            VaultManifest::load(&path.join("tessera.json"))
+                .expect("legacy manifest")
+                .format_version,
+            2
+        );
+    }
+
+    #[test]
+    fn unmarked_staging_collision_fails_without_overwriting_unknown_residue() {
+        let (_directory, path, _hash) = legacy_fixture();
+        let collision = path.join(PREPARED_NAME);
+        std::fs::write(&collision, b"owner-unknown-staging-residue").expect("collision");
+        assert!(matches!(
+            migrate(&path, "migration-passphrase"),
+            Err(MetadataMigrationError::InvalidState)
+        ));
+        assert_eq!(
+            std::fs::read(&collision).expect("preserved collision"),
+            b"owner-unknown-staging-residue"
+        );
+        assert!(path.join("vault.db").is_file());
+        assert!(!path.join(RETIRED_NAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_permission_failure_preserves_legacy_authority() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_directory, path, _hash) = legacy_fixture();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500))
+            .expect("make bundle read-only");
+        let result = migrate(&path, "migration-passphrase");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("restore bundle permissions");
+        assert!(result.is_err());
+        assert!(path.join("vault.db").is_file());
+        assert!(!path.join(RETIRED_NAME).exists());
+        assert_eq!(
+            VaultManifest::load(&path.join("tessera.json"))
+                .expect("legacy manifest")
+                .format_version,
+            2
+        );
     }
 
     #[test]

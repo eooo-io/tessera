@@ -13,7 +13,7 @@ pushed. This report contains synthetic aggregate evidence only.
 | Versioned metadata protections | Format v3 uses keyed SQLCipher, TSB2 opaque blobs, minimized manifest, encrypted model registry, and migration 0022 | `db::tests`; `vault::metadata::tests`; ADR-0002; `spec/vault-format.md` |
 | Locked scans match exposure set | Recursive path-and-byte scanner uses only synthetic category sentinels and the real protected logical hash | `metadata_privacy::synthetic_metadata_inventory_and_confirmation_guesses_are_absent_when_locked` |
 | Inbox and temp residue bounded | Owner-only atomic partials; abandoned inbox partials are removed; fetched bodies remain in bounded memory; unavoidable external-tool files use owner-only temporary directories | inbox/web/extract tests and `metadata_privacy::bundle_directories_and_files_are_owner_only`; no secure-deletion claim |
-| Copy, backup, restore, cross-platform open | Keyed online backup creates a protected destination; migrated fixture backs up, restores, unlocks, verifies, and extends its receipt chain | `vault::metadata::tests::legacy_migration_protects_database_manifest_and_blob_address`; `recovery::tests::backup_restores_same_source_identity_at_new_path`; exact-head platform CI required below |
+| Copy, backup, restore, cross-platform open | Keyed online backup creates a protected staging bundle, reopens and diagnoses it before publication; migrated fixture backs up, restores, unlocks, verifies, and extends its receipt chain | `vault::metadata::tests::legacy_migration_protects_database_manifest_and_blob_address`; `recovery::tests::backup_restores_same_source_identity_at_new_path`; `failed_backup_removes_private_staging_bundle`; exact-head platform CI required below |
 | Measure performance and repair tradeoffs | Controlled synthetic migration, storage, semantic query, diagnostics, repair, and backup measurements | `metadata_performance.rs`; ignored migration measurement; results below |
 | Format and security docs match | Format v3, ADR, threat model, Spec Kit artifacts, and recovery runbook describe the same boundary | `spec/vault-format.md`; `docs/adr/0002-metadata-confidentiality-v0.1.md`; `docs/recovery-runbook.md` |
 
@@ -26,9 +26,9 @@ pushed. This report contains synthetic aggregate evidence only.
 | `keyslot.bin` | Magic, slot count, KDF costs, salts, nonces, wrapped-key sizes | Allows offline passphrase guessing subject to Argon2id cost; does not reveal the DEK without a valid passphrase |
 | `vault.db`, WAL, SHM | File presence, lengths, filesystem timestamps, page-write/access patterns | SQLCipher protects page contents; size and activity remain traffic-analysis signals |
 | `blobs/<shard>/<opaque-address>` | Count, keyed tokens, sizes, timestamps, shard distribution | Does not provide a public guessed-content verifier; same-vault equality and activity remain observable |
-| `receipts/<receipt-id>.trc` | Count, opaque ids, container sizes, timestamps | Receipt content, chain, sessions, pairing, policy, and disclosures remain protected |
+| `receipts/rcpt_<ULID>.trc` | Count, millisecond creation time encoded by ULID, container sizes, filesystem timestamps | Receipt content, chain, sessions, pairing, policy, and disclosures remain protected |
 | `inbox/` final staged files | Names and plaintext content by owner intent | Explicitly outside locked-vault confidentiality until ingestion |
-| Partial, prepared, and migration files | Fixed structural names and current existence | Owner-only; content is protected except retained legacy authority during explicit migration |
+| Partial, prepared, and migration files | Fixed migration names; owner-derived inbox/backup prefixes; ULIDs in atomic manifest, blob, and receipt temp names; current existence | Owner-only; content is protected except intentional inbox partials and retained legacy authority during explicit migration |
 | Backup/sync copies | Same structural, size, timestamp, and traffic exposure as source | Provider may retain old plaintext legacy copies or deleted blocks; Tessera cannot revoke provider snapshots |
 
 The implementation does not protect an unlocked process from same-user
@@ -40,21 +40,25 @@ or guarantee forensic deletion on journals, snapshots, SSDs, or providers.
 - Database protection: 11 focused tests passed, covering key installation,
   wrong key, plaintext database, truncation, page tamper, locked byte scan, WAL,
   foreign keys, temporary memory, and migrations.
-- Private registry and migration: 9 focused tests passed and 1 performance test
+- Private registry and migration: 14 focused tests passed and 1 performance test
   was intentionally ignored in the ordinary run. The tests cover malformed
-  rows/markers, active sessions, successful and repeated conversion, logical
-  inventory, migrated backup/restore, receipt verification/continuation, and
-  resume after all four durable boundaries.
-- Locked privacy and permissions: 3 integration tests passed, with zero matches
-  for seven protected category sentinels, the real logical content hash, and
-  100 guessed-document hashes.
+  rows/markers, staging collisions, capacity and permission failures, fatal
+  source diagnostics, successful and repeated conversion, logical inventory,
+  migrated backup/restore, receipt verification/continuation, and resume after
+  all five durable boundaries including the retire-before-select crash window.
+- Locked privacy and permissions: 4 integration tests passed. They inventory
+  every stable path class and find zero locked-byte or path matches for the
+  synthetic protected categories, real logical content hashes, and 100
+  guessed-document hashes including one known-present candidate. Focused fault
+  tests cover transient migration, backup, inbox, blob, receipt, and external
+  tool paths that cannot all exist in one stable closed-bundle fixture.
 - Blob protection: 17 focused unit tests cover TSB2 framing, address binding,
   cross-vault unlinkability, tamper, wrong key, deduplication, atomic writes,
   authenticated legacy conversion, orphan conversion, and unknown residue.
 - CLI confirmation: 1 focused end-to-end test passed for explicit `--yes` and
   idempotent format-v3 operation.
 
-The final pre-review `cargo test --workspace --all-targets` run passed 352 tests
+The final local `cargo test --workspace --all-targets` run passed 360 tests
 with 4 intentionally ignored performance tests and no failures. The required
 ignored workspace run then passed all 4 ignored tests with no failures.
 
@@ -65,27 +69,25 @@ fixture only. These are regression observations, not production benchmarks.
 
 | Measurement | Run 1 | Run 2 | Variance |
 |---|---:|---:|---:|
-| Legacy migration, controlled warm rerun | 522 ms | 529 ms | 1.3% |
+| Legacy migration | 605 ms | 595 ms | 1.7% |
 | Legacy/protected database size | 675,840 / 688,128 bytes | same | 1.8% protected overhead |
-| New protected vault creation | 123 ms | 122 ms | 0.8% |
-| Ingest/extract/chunk 100 synthetic documents | 1,358 ms | 1,312 ms | 3.5% |
-| Protected semantic query, top 10 | 1,602 us | 1,654 us | 3.2% |
-| Diagnostics | 26 ms | 25 ms | 4.0% |
-| No-fault derived repair path | 166 ms | 166 ms | 0.0% |
-| Keyed backup | 817 ms | 854 ms | 4.5% |
+| New protected vault creation | 116 ms | 119 ms | 2.6% |
+| Ingest/extract/chunk 100 synthetic documents | 1,285 ms | 1,277 ms | 0.6% |
+| Protected semantic query, top 10 | 1,570 us | 1,699 us | 8.2% |
+| Diagnostics | 26 ms | 27 ms | 3.8% |
+| No-fault derived repair path | 174 ms | 173 ms | 0.6% |
+| Keyed backup including destination validation | 958 ms | 958 ms | 0.0% |
+| Restore open, diagnostics, and receipt verification | 108 ms | 107 ms | 0.9% |
 | Source / backup bundle size | 7,133,489 / 2,502,769 bytes | same | WAL and derived state explain non-equivalence |
 
-The first two migration observations after rebuilding were 723 ms and 606 ms,
-a material 19.3% spread. Three immediate controlled reruns were 522, 529, and
-528 ms, a 1.3% range across the reported pair; the cold-cache outliers are not
-discarded. Exact values are host-, filesystem-, cache-, fixture-, and
-build-profile-dependent.
+No reported final-state pair varied by 10% or more. Exact values remain host-,
+filesystem-, cache-, fixture-, and build-profile-dependent.
 
-The final required ignored-suite observation remained inside that controlled
-range: migration 538 ms; protected vault creation 110 ms; 100-document ingest
-1,274 ms; top-10 semantic query 1,601 us; diagnostics 25 ms; repair 167 ms;
-backup 831 ms. It measured the same database and bundle byte counts shown
-above.
+The final required ignored-suite observation remained inside those controlled
+ranges: migration 603 ms; protected vault creation 112 ms; 100-document ingest
+1,306 ms; top-10 semantic query 1,629 us; diagnostics 27 ms; repair 175 ms;
+backup 949 ms; restore validation 108 ms. It measured the same database and
+bundle byte counts shown above.
 
 ## Platform CI binding
 
@@ -100,6 +102,8 @@ above.
   the process or deliberately prints/exports it.
 - File counts, sizes, stable component names, filesystem timestamps, and access
   patterns remain observable.
+- Receipt and several atomic temporary filenames contain ULIDs; receipt ULIDs
+  persist and reveal millisecond generation time.
 - `keyslot.bin` necessarily exposes salts and KDF parameters for portable
   passphrase unlocking.
 - Inbox final files are intentional plaintext. Temp cleanup removes directory

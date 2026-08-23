@@ -25,7 +25,7 @@ queries across the core library.
 Tessera vault format v3 will:
 
 1. encrypt and authenticate the complete SQLite database and journal pages with
-   SQLCipher using a raw 256-bit key derived from the vault DEK under
+   SQLCipher using a 256-bit high-entropy secret derived from the vault DEK under
    `tessera database encryption key v1`;
 2. force non-transaction SQLite temporary storage to memory and key every
    primary, reopened, backup, diagnostic, and migration connection before its
@@ -34,8 +34,9 @@ Tessera vault format v3 will:
    deduplication, provenance, and receipt evidence;
 4. derive a separate key under `tessera blob address key v1` and use a keyed
    BLAKE3 token as the only locked-visible blob path;
-5. introduce blob container v2, authenticated against its opaque address, so
-   tampering, cross-vault copying, and path relocation fail closed;
+5. derive TSB2 payload encryption under `tessera blob encryption key v2` and
+   authenticate each container against its opaque address, so tampering,
+   cross-vault copying, and path relocation fail closed;
 6. reduce the public manifest to format and pre-unlock portability parameters,
    moving creation time, embedding model registry, and private legacy extension
    fields into an encrypted `vault_metadata` table;
@@ -173,8 +174,8 @@ protected manifest would create reconciliation and recovery complexity.
 ## Explicit residual risks
 
 - File and directory names that define the bundle structure, ciphertext count
-  and size, filesystem times, allocation behavior, opaque receipt ids, and
-  migration phase remain visible.
+  and size, filesystem times, allocation behavior, receipt ULIDs and their
+  embedded millisecond generation times, and migration phase remain visible.
 - Intentional inbox files remain plaintext until ingestion. Tessera minimizes
   partial copies but cannot make plaintext staging encrypted without changing
   the owner workflow and vault boundary.

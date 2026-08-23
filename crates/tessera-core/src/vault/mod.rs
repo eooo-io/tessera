@@ -112,13 +112,34 @@ impl Vault {
         }
         permissions::validate_bundle_layout(path)?;
         permissions::harden_tree(path)?;
-        let mut manifest = VaultManifest::load(&manifest_path)?;
+        let manifest = VaultManifest::load(&manifest_path)?;
         if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(path) {
             return Err(VaultError::MetadataMigrationRequired);
         }
 
         let keyslots = KeyslotFile::load(&path.join("keyslot.bin"))?;
         let dek = keyslots.unlock(passphrase)?;
+
+        Self::open_with_dek(path, dek)
+    }
+
+    /// Open a complete current-format bundle with an already authenticated
+    /// vault key. Used internally to validate a copied bundle before a backup
+    /// operation reports success.
+    pub(crate) fn open_with_dek(path: &Path, dek: Dek) -> Result<Self, VaultError> {
+        let manifest_path = path.join("tessera.json");
+        if !manifest_path.is_file() {
+            return Err(VaultError::NotFound(path.to_path_buf()));
+        }
+        permissions::validate_bundle_layout(path)?;
+        permissions::harden_tree(path)?;
+        let mut manifest = VaultManifest::load(&manifest_path)?;
+        if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(path) {
+            return Err(VaultError::MetadataMigrationRequired);
+        }
+        // Parsing the copied keyslot file is part of bundle validation even
+        // though the already-authenticated DEK avoids retaining a passphrase.
+        KeyslotFile::load(&path.join("keyslot.bin"))?;
 
         let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
         metadata::hydrate_manifest(&conn, &mut manifest)?;

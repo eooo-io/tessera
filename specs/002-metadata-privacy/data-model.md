@@ -4,14 +4,16 @@
 
 | Capability | Root | Derivation context | Persistence |
 |---|---|---|---|
-| Blob payload encryption | vault DEK | existing direct DEK use | never serialized |
+| Blob payload encryption v2 | vault DEK | `tessera blob encryption key v2` | never serialized |
 | Blob opaque addressing | vault DEK | `tessera blob address key v1` | never serialized |
 | Database page encryption | vault DEK | `tessera database encryption key v1` | never serialized |
 | Receipt payload encryption | vault DEK | `tessera receipt encryption key v1` | never serialized |
 | Receipt-chain authentication | vault DEK | `tessera receipt authentication key v1` | never serialized |
 
 Every derived key is 256 bits, created on demand, and zeroized on drop. A key
-from one domain must not be accepted in another domain.
+from one domain must not be accepted in another domain. Legacy blob container
+v1 decryption uses the direct DEK only inside the explicit migration reader;
+all newly written TSB2 payloads use the v2 domain.
 
 ## Logical content identity
 

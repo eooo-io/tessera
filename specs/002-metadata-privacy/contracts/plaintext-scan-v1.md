@@ -14,19 +14,22 @@ The scanner builds a disposable vault with unique synthetic sentinels for:
 - receipt index and protected receipt payload fields;
 - conversation archive, node, part, attachment, provenance, and run metadata;
 - original, derived, summary, image, and conversation blob content and hashes;
-- interrupted database, blob, inbox, backup, and temporary-file boundaries.
+- synthetic representatives for database, blob, inbox, backup, and temporary
+  path classes. Focused fault tests exercise each real interrupted boundary.
 
 The fixture MUST NOT read, copy, enumerate, or derive sentinels from an owner
 vault or private corpus.
 
 ## Scan
 
-- Close every vault and database handle before the locked scan.
+- Close every vault and database handle before the primary locked scan. A
+  separate raw WAL assertion runs while a connection holds encrypted pages.
 - Recursively inspect raw file bytes and relative path components.
 - Search exact sentinel bytes, their lowercase and uppercase encodings, public
   BLAKE3 hashes, and category-specific normalized forms.
-- Inventory every file, directory, size, permission mode where supported, and
-  recognized container class.
+- Inventory every file, directory, non-empty durable-file size, permission mode
+  where supported, and recognized container class. Bind interrupted residue to
+  the focused blob, receipt, inbox, migration, backup, and external-tool tests.
 - Permit only intentional inbox plaintext created by the fixture and the exact
   structural exposure listed in the threat model.
 - Treat any unexpected match as a test failure with a synthetic category and
@@ -41,7 +44,8 @@ must be indistinguishable from absent candidates without the vault key.
 
 ## Output
 
-The report contains aggregate counts, category labels, relative synthetic
-paths, allowed structural classes, and timing. It MUST NOT contain passphrases,
+The report contains aggregate counts, category labels, allowed structural
+classes, and timing; relative synthetic paths appear only in safe test failure
+messages. It MUST NOT contain passphrases,
 keys, private content, raw protected rows, bearer tokens, or sensitive receipt
 payloads.

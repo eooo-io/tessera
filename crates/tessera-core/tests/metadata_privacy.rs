@@ -28,6 +28,89 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn locked_path_class(relative: &Path, is_dir: bool) -> Option<&'static str> {
+    let parts = relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [name] if is_dir && matches!(name.as_str(), "blobs" | "receipts" | "inbox") => {
+            Some("stable-directory")
+        }
+        [name]
+            if !is_dir
+                && matches!(
+                    name.as_str(),
+                    "tessera.json" | "keyslot.bin" | "vault.db" | "vault.db-wal" | "vault.db-shm"
+                ) =>
+        {
+            Some("stable-file")
+        }
+        [root, shard]
+            if is_dir
+                && root == "blobs"
+                && shard.len() == 2
+                && shard.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Some("blob-shard")
+        }
+        [root, shard, address]
+            if !is_dir
+                && root == "blobs"
+                && shard.len() == 2
+                && shard.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && address.len() == 64
+                && address.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Some("opaque-blob")
+        }
+        [root, receipt]
+            if !is_dir
+                && root == "receipts"
+                && receipt.starts_with("rcpt_")
+                && receipt.ends_with(".trc") =>
+        {
+            Some("opaque-receipt-with-ulid-time")
+        }
+        _ => None,
+    }
+}
+
+fn assert_documented_locked_path_inventory(root: &Path) {
+    fn visit(root: &Path, path: &Path, classes: &mut Vec<&'static str>) {
+        for entry in std::fs::read_dir(path).expect("read locked path inventory") {
+            let entry = entry.expect("locked path entry");
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).expect("locked path metadata");
+            let relative = path.strip_prefix(root).expect("relative locked path");
+            let class = locked_path_class(relative, metadata.is_dir()).unwrap_or_else(|| {
+                panic!("undocumented locked-visible path: {}", relative.display())
+            });
+            classes.push(class);
+            if metadata.is_dir() {
+                visit(root, &path, classes);
+            } else {
+                assert!(
+                    metadata.len() > 0,
+                    "empty durable file: {}",
+                    relative.display()
+                );
+            }
+        }
+    }
+    let mut classes = Vec::new();
+    visit(root, root, &mut classes);
+    for required in [
+        "stable-directory",
+        "stable-file",
+        "blob-shard",
+        "opaque-blob",
+        "opaque-receipt-with-ulid-time",
+    ] {
+        assert!(classes.contains(&required), "missing path class {required}");
+    }
+}
+
 fn assert_absent_from_locked_bundle(root: &Path, sentinel: &str) {
     for file in files_under(root) {
         assert!(
@@ -76,6 +159,15 @@ fn synthetic_metadata_inventory_and_confirmation_guesses_are_absent_when_locked(
         sentinels[6].as_bytes(),
     )
     .expect("artifact");
+    artifact::register_encrypted_bytes(
+        &vault,
+        &space,
+        "known-present-candidate.md",
+        "text/markdown",
+        artifact::Sensitivity::Restricted,
+        b"candidate-document-042",
+    )
+    .expect("known-present confirmation candidate");
     artifact::tag(&vault, &artifact_id, sentinels[2]).expect("tag");
     let policy = LensPolicy::new(sentinels[3], vec![space]);
     lens::create(&vault, &policy).expect("lens");
@@ -108,6 +200,44 @@ fn synthetic_metadata_inventory_and_confirmation_guesses_are_absent_when_locked(
             assert_absent_from_locked_bundle(root, &public_hash);
         }
     }
+}
+
+#[test]
+fn locked_visible_paths_match_the_documented_structural_allowlist() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("PathInventory.tessera");
+    let vault =
+        Vault::create_with_params(&path, "privacy-passphrase", &TEST_PARAMS).expect("create vault");
+    let space = space::create(&vault, "synthetic path inventory", None).expect("space");
+    artifact::register_encrypted_bytes(
+        &vault,
+        &space,
+        "synthetic.md",
+        "text/markdown",
+        artifact::Sensitivity::Internal,
+        b"synthetic path inventory content",
+    )
+    .expect("artifact");
+    let policy = LensPolicy::new("path inventory", vec![space]);
+    receipt::Session::open(
+        &vault,
+        receipt::AgentRef {
+            agent_id: "synthetic-path-agent".into(),
+            name: "Synthetic path agent".into(),
+        },
+        &policy,
+        "path inventory",
+        false,
+    )
+    .expect("receipt session")
+    .finalize()
+    .expect("receipt");
+    let backup = directory.path().join("PathInventoryBackup.tessera");
+    tessera_core::recovery::backup(&vault, &backup).expect("protected backup");
+    drop(vault);
+
+    assert_documented_locked_path_inventory(&path);
+    assert_documented_locked_path_inventory(&backup);
 }
 
 #[test]
