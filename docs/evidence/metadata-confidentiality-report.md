@@ -98,6 +98,13 @@ warmed 100-query distribution and a 21-creation distribution instead of
 selecting favorable single observations; median and p95 are retained. Exact
 values remain host-, filesystem-, cache-, fixture-, and build-profile-dependent.
 
+The required ignored workspace run on the committed candidate recorded:
+migration 661 ms; protected-vault creation median/p95 105/115 ms across 21
+samples; 100-document ingest 1,259 ms; top-10 semantic query median/p95
+1,201/1,342 us across 100 samples; diagnostics 27 ms; repair 171 ms; backup
+927 ms; restore validation 106 ms. Those observations remain within the
+controlled ranges above and use the same database and bundle byte counts.
+
 ## Platform CI binding
 
 - Required base commit `e655acec9c32d9ed3b1f42ad9d9bc68e9c2a4cd4`:
