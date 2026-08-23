@@ -6,7 +6,7 @@ gate and Linux GitHub Actions.
 
 | Required scenario | Automated evidence | Proven boundary |
 |---|---|---|
-| crash during inbox copy | `inbox::tests::crash_left_partial_copy_is_never_processable` | abandoned `.partial` files are ignored and retained for diagnosis |
+| crash during inbox copy | `inbox::tests::crash_left_partial_copy_is_never_processable` | abandoned `.partial` files are never listed or processed and are removed on the next inbox scan; no secure-deletion claim |
 | disk full during copy | `inbox::tests::simulated_disk_full_never_exposes_a_partial_staged_file` | no truncated final staging name; owner source remains |
 | permission failure | `inbox::tests::staging_permission_failure_preserves_owner_source` | non-zero failure, no staged partial, source unchanged |
 | crash during encrypt | `blob::tests::crash_residue_from_encrypt_is_replaced_only_by_authenticated_complete_blob` | unique synced temporary ciphertext; only authenticated final address is readable |
@@ -22,9 +22,22 @@ gate and Linux GitHub Actions.
 | missing/duplicate chunks or maps | `recovery::tests::duplicate_chunk_and_embedding_map_rows_are_rejected`, `recovery::tests::corrupted_chunk_is_repairable_and_never_returned_as_content`, and `index::sqlite_vec::tests::delete_removes_from_results_and_len` | duplicates are rejected; missing/corrupt derived rows are detectable/rebuildable |
 | stale/missing WAL/SHM | `recovery::tests::backup_restores_same_source_identity_at_new_path` | online backup produces no copied sidecars and reopens/query-verifies independently |
 | partial bundle copy | `recovery::tests::partial_bundle_fails_loudly` | missing keyslot prevents open rather than yielding a partial vault |
-| backup while Guardian active | `recovery::tests::backup_refuses_an_active_guardian_session` | active sessions fail loudly; idle writer barrier remains supported |
+| backup while Guardian active or racing diagnostics | `recovery::tests::{backup_refuses_an_active_guardian_session,backup_rechecks_sessions_after_acquiring_its_writer_barrier}` | active sessions fail loudly and the check is repeated under the snapshot writer barrier; idle Guardian remains supported |
+| backup copy/verification failure | `recovery::tests::failed_backup_removes_private_staging_bundle` | no destination is published and the private staging directory is removed |
+| structurally valid keyslot swap before backup | `recovery::tests::backup_refuses_a_structurally_valid_swapped_keyslot_file` | copied keyslot bytes must bind to the state that unlocked the source; an unrelated but parseable keyslot cannot be published as a verified backup |
+| foreign keyslot mutation followed by owner removal | `recovery::tests::keyslot_mutation_cannot_launder_a_foreign_file_into_backup_binding` | add/remove accepts only the exact parsed bytes bound at unlock, so mutation cannot refresh trust in an unrelated keyslot file |
 | restore new path/host | `recovery::tests::backup_restores_same_source_identity_at_new_path` | source id/hash, semantic query, and receipt-chain continuity survive path change |
-| migration interruption | `db::tests::interrupted_migration_transaction_leaves_no_schema_or_ledger_fragment` | schema and migration ledger roll back together |
+| format-v3 metadata migration interruption | `vault::metadata::tests::every_durable_migration_boundary_resumes_to_one_valid_vault` | blob conversion, database prepare, legacy retirement, protected selection, and manifest commit each resume to one validated authority; the retire-before-select window never creates an empty database |
+| format-v3 malformed or unsupported state | `vault::metadata::tests::{malformed_marker_and_active_session_fail_closed,unmarked_staging_collision_fails_without_overwriting_unknown_residue,v3_resume_validates_marker_and_protected_state_before_cleanup}` | marker claims and unknown prepared/retired residue are distrusted; cleanup follows full protected validation |
+| format-v3 capacity failure | `vault::metadata::tests::insufficient_staging_capacity_preserves_legacy_authority` | no protected replacement is selected and the legacy database remains authoritative |
+| format-v3 permission failure | `vault::metadata::tests::migration_permission_failure_preserves_legacy_authority` | non-zero failure leaves the legacy authority and manifest unchanged |
+| format-v3 fatal source state | `vault::metadata::tests::fatal_source_diagnostics_refuse_selection_and_preserve_legacy_authority` | SQLite-valid but logically fatal source evidence is refused before selection |
+| concurrent legacy writer during format-v3 selection | `vault::metadata::tests::{concurrent_commit_after_export_fails_closed_and_is_preserved_on_retry,exclusive_selection_boundary_rejects_a_competing_writer}` | a commit during export makes the candidate stale and remains authoritative for retry; final row fingerprints and legacy retirement occur under one exclusive SQLite writer boundary |
+| filesystem-first legacy blob write during selection | `vault::metadata::tests::late_legacy_blob_write_is_protected_and_forces_retry` | late public-hash containers are authenticated, converted to opaque storage, and force retry before successful exit |
+| post-manifest retired-database cleanup race | `vault::metadata::tests::post_manifest_cleanup_reacquires_exclusive_legacy_boundary` | v3 recovery reacquires the exclusive writer boundary and unlinks the retired authority before releasing it |
+| pre-seeded new-vault component symlink | `vault::tests::create_refuses_preseeded_component_symlinks_without_writing_through_them` | creation accepts only an absent or empty real target directory and writes nothing through an attacker-provided component |
+| transactional schema migration interruption | `db::tests::interrupted_migration_transaction_leaves_no_schema_or_ledger_fragment` | schema and migration ledger roll back together |
+| web and DOCX extraction working copies | `web::tests::curl_metadata_trailer_keeps_body_and_headers_in_memory`, `extract::tests::{pandoc_pipe_creates_no_named_plaintext_working_copy,docx_extracts_via_pandoc_stdin_without_plaintext_tempfile}` | response metadata/body and decrypted DOCX bytes cross process pipes without application-owned named plaintext files |
 | model corruption | `embed::onnx::tests::substituted_model_files_fail_verification_before_load`, CLI model-install rollback test | corrupt weights/tokenizer never activate or load |
 | derived rebuild | `recovery::tests::owner_derived_rebuild_preserves_source_identity_and_returns_live_items_to_pending` | source identity and receipts remain; rebuilt items require owner review/reindex |
 

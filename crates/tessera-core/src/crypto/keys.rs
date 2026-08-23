@@ -70,6 +70,33 @@ impl Dek {
         Self { bytes: self.bytes }
     }
 
+    /// Domain-separated raw key for SQLCipher database page protection.
+    /// Derived on demand, never serialized, and zeroized when dropped.
+    pub(crate) fn database_encryption_key(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera database encryption key v1",
+            &self.bytes,
+        ))
+    }
+
+    /// Domain-separated key for computing vault-specific opaque blob paths.
+    /// Derived on demand, never serialized, and zeroized when dropped.
+    pub(crate) fn blob_address_key(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera blob address key v1",
+            &self.bytes,
+        ))
+    }
+
+    /// Domain-separated key for format-v2 blob payload encryption.
+    /// Legacy format-v1 blobs retain direct-DEK decryption only for migration.
+    pub(crate) fn blob_encryption_key_v2(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(blake3::derive_key(
+            "tessera blob encryption key v2",
+            &self.bytes,
+        ))
+    }
+
     /// Domain-separated key for protected receipt containers. This key is
     /// derived on demand, never serialized, and zeroized when dropped.
     pub(crate) fn receipt_encryption_key(&self) -> Zeroizing<[u8; 32]> {
@@ -191,6 +218,19 @@ impl KeyslotFile {
     /// Parse `keyslot.bin`.
     pub fn load(path: &Path) -> Result<Self, CryptoError> {
         let bytes = std::fs::read(path)?;
+        Self::parse(&bytes)
+    }
+
+    /// Parse `keyslot.bin` and return a digest of the exact bytes parsed. This
+    /// lets an unlocked vault bind later keyslot mutations to the file that
+    /// actually authenticated its in-memory DEK without a read/parse race.
+    pub(crate) fn load_bound(path: &Path) -> Result<(Self, [u8; 32]), CryptoError> {
+        let bytes = std::fs::read(path)?;
+        let digest = *blake3::hash(&bytes).as_bytes();
+        Ok((Self::parse(&bytes)?, digest))
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() < 5 || &bytes[0..4] != MAGIC {
             return Err(CryptoError::InvalidFormat("bad magic".into()));
         }
@@ -223,6 +263,13 @@ impl KeyslotFile {
 
     /// Write `keyslot.bin` (atomic: temp file + rename).
     pub fn save(&self, path: &Path) -> Result<(), CryptoError> {
+        self.save_bound(path).map(|_| ())
+    }
+
+    /// Write and return the digest of the exact bytes published. Callers that
+    /// already trust this parsed keyslot state can update an in-memory binding
+    /// without re-reading an attacker-replaceable path after rename.
+    pub(crate) fn save_bound(&self, path: &Path) -> Result<[u8; 32], CryptoError> {
         if self.slots.len() > u8::MAX as usize {
             return Err(CryptoError::InvalidFormat("too many keyslots".into()));
         }
@@ -237,6 +284,7 @@ impl KeyslotFile {
             bytes.extend_from_slice(&slot.nonce);
             bytes.extend_from_slice(&slot.wrapped_dek);
         }
+        let digest = *blake3::hash(&bytes).as_bytes();
 
         let parent = path.parent().ok_or_else(|| {
             CryptoError::InvalidFormat("keyslot file has no parent directory".into())
@@ -247,6 +295,7 @@ impl KeyslotFile {
                 .write(true)
                 .create_new(true)
                 .open(&tmp)?;
+            crate::vault::permissions::file(&tmp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)?;
@@ -257,7 +306,7 @@ impl KeyslotFile {
             let _ = std::fs::remove_file(&tmp);
             return Err(error.into());
         }
-        Ok(())
+        Ok(digest)
     }
 }
 
@@ -312,6 +361,29 @@ mod tests {
             dek.receipt_authentication_key().as_ref()
         );
         assert_ne!(dek.receipt_encryption_key().as_ref(), dek.as_bytes());
+    }
+
+    #[test]
+    fn metadata_keys_are_stable_and_domain_separated() {
+        let (_file, dek) = KeyslotFile::create("metadata", &TEST_PARAMS).expect("create");
+        assert_eq!(
+            dek.database_encryption_key().as_ref(),
+            dek.database_encryption_key().as_ref()
+        );
+        assert_eq!(
+            dek.blob_address_key().as_ref(),
+            dek.blob_address_key().as_ref()
+        );
+        assert_ne!(
+            dek.database_encryption_key().as_ref(),
+            dek.blob_address_key().as_ref()
+        );
+        assert_ne!(
+            dek.database_encryption_key().as_ref(),
+            dek.receipt_encryption_key().as_ref()
+        );
+        assert_ne!(dek.database_encryption_key().as_ref(), dek.as_bytes());
+        assert_ne!(dek.blob_address_key().as_ref(), dek.as_bytes());
     }
 
     #[test]

@@ -848,7 +848,7 @@ fn valid_receipt_id(receipt_id: &str) -> bool {
 /// committed before the prepared file could be renamed into place.
 fn recover_committed_files(vault: &Vault) -> Result<(), ReceiptError> {
     let dir = receipts_dir(vault);
-    std::fs::create_dir_all(&dir)?;
+    crate::vault::permissions::directory(&dir)?;
     let mut stmt = vault
         .conn()
         .prepare("SELECT receipt_id, file_name FROM receipts_index ORDER BY seq")?;
@@ -1079,6 +1079,69 @@ fn require_protected_storage(vault: &Vault) -> Result<(), ReceiptError> {
     Ok(())
 }
 
+/// Verify either the current protected receipt chain or the authenticated
+/// legacy chain during whole-bundle migration diagnostics. Ordinary format-v3
+/// diagnostics still reject any legacy JSON receipt residue.
+pub(crate) fn verify_for_diagnostics(vault: &Vault) -> Result<usize, ReceiptError> {
+    let legacy_count = legacy_receipt_count(vault)?;
+    if vault.manifest().format_version >= 3 || legacy_count == 0 {
+        return verify(vault);
+    }
+    recover_committed_files(vault)?;
+    ensure_receipt_index(vault)?;
+    let receipts = load_legacy_all(vault)?;
+    verify_legacy_chain_records(vault, &receipts)?;
+    let mut statement = vault.conn().prepare(
+        "SELECT receipt_id, seq, prev_receipt_hash, self_hash, file_name
+         FROM receipts_index ORDER BY seq",
+    )?;
+    let indexed = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if indexed.len() != receipts.len() || receipts.len() != legacy_count {
+        return Err(ReceiptError::ChainBroken {
+            seq: receipts.len() as u64,
+            reason: "legacy receipt directory and durable index count disagree".into(),
+        });
+    }
+    for (receipt, (id, seq, prev, self_hash, file_name)) in receipts.iter().zip(indexed) {
+        if receipt.receipt_id != id
+            || receipt.seq != seq
+            || receipt.prev_receipt_hash != prev
+            || receipt.self_hash.as_deref() != Some(self_hash.as_str())
+            || file_name != format!("{id}.json")
+        {
+            return Err(ReceiptError::ChainBroken {
+                seq: receipt.seq,
+                reason: "legacy receipt directory and durable index disagree".into(),
+            });
+        }
+    }
+    let (next_seq, head_hash): (i64, Option<String>) = vault.conn().query_row(
+        "SELECT next_seq, head_hash FROM receipt_chain_state WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let expected_head = receipts
+        .last()
+        .and_then(|receipt| receipt.self_hash.clone());
+    if next_seq != receipts.len() as i64 || head_hash != expected_head {
+        return Err(ReceiptError::ChainBroken {
+            seq: next_seq.max(0) as u64,
+            reason: "legacy durable receipt chain head does not match verified files".into(),
+        });
+    }
+    Ok(receipts.len())
+}
+
 /// Convert one complete, valid plaintext receipt chain into protected storage.
 /// The transition is explicit, idempotent, and all-or-nothing at the durable
 /// index/head boundary.
@@ -1187,6 +1250,7 @@ fn migrate_legacy_receipts_at(
             .write(true)
             .create_new(true)
             .open(&prepared)?;
+        crate::vault::permissions::file(&prepared)?;
         file.write_all(&protect_receipt(vault, receipt)?)?;
         file.sync_all()?;
     }
@@ -1265,7 +1329,9 @@ fn migrate_legacy_receipts_at(
     if failpoint == Some(MigrationFailpoint::AfterFiles) {
         return Err(ReceiptError::MigrationInterrupted("after files"));
     }
-    vault.set_format_version_for_migration(2)?;
+    if vault.manifest().format_version < 2 {
+        vault.set_format_version_for_migration(2)?;
+    }
     verify(vault)?;
     Ok(protected.len())
 }
@@ -1280,7 +1346,7 @@ fn finalize_receipt(
     require_protected_storage(vault)?;
 
     let dir = receipts_dir(vault);
-    std::fs::create_dir_all(&dir)?;
+    crate::vault::permissions::directory(&dir)?;
     let prepared = prepared_path(vault, &receipt.receipt_id);
     let final_file = final_path(vault, &receipt.receipt_id);
     if prepared.exists() || final_file.exists() {
@@ -1319,6 +1385,7 @@ fn finalize_receipt(
             .write(true)
             .create_new(true)
             .open(&prepared)?;
+        crate::vault::permissions::file(&prepared)?;
         file.write_all(&protect_receipt(vault, &receipt)?)?;
         file.sync_all()?;
 
@@ -1368,6 +1435,28 @@ fn finalize_receipt(
     std::fs::rename(&prepared, &final_file)?;
     sync_dir(&dir)?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+pub(crate) fn downgrade_receipt_fixture(
+    vault: &mut Vault,
+    mut receipt: Receipt,
+) -> Result<(), ReceiptError> {
+    std::fs::remove_file(protected_path(vault, &receipt.receipt_id))?;
+    receipt.seq = 0;
+    receipt.prev_receipt_hash = None;
+    receipt.self_hash = Some(legacy_content_hash(&receipt)?);
+    std::fs::write(
+        legacy_path(vault, &receipt.receipt_id),
+        serde_json::to_vec_pretty(&receipt)?,
+    )?;
+    vault.conn().execute_batch(
+        "DELETE FROM receipts_index;
+         UPDATE receipt_chain_state
+         SET next_seq = 0, head_hash = NULL WHERE singleton = 1;",
+    )?;
+    vault.set_format_version_for_migration(1)?;
+    Ok(())
 }
 
 /// All finalized receipts in the vault, sorted by sequence.

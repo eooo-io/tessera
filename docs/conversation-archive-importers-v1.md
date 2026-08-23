@@ -69,11 +69,13 @@ lineage without deleting prior evidence.
 
 ## Metadata and validation boundary
 
-Only the existing migration-0020 whitelist may enter the plaintext metadata
-index: source product, session id, project/repository, working directory, git
-branch/commit, source-file identity, models, and source timestamps. Prompts,
-responses, tool data, attachment names/content, and unsupported source data
-remain encrypted.
+Only the existing migration-0020 whitelist may enter the format-v3
+SQLCipher-protected metadata index: source product, session id,
+project/repository, working directory, git branch/commit, source-file identity,
+models, and source timestamps. These fields, prompts, responses, tool data,
+attachment names/content, and unsupported source data are protected while the
+vault is locked. Legacy format-v2 vaults use the documented format-v3
+migration before normal open.
 
 The checked-in fixtures are synthetic and sanitized. They prove ChatGPT branch
 separation, selected-path rendering, hidden/deleted/unsupported structures,

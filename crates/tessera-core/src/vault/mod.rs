@@ -1,12 +1,16 @@
 //! Vault initialization, open, lock/unlock.
 
 pub mod manifest;
+pub(crate) mod metadata;
+pub(crate) mod permissions;
 
 pub use manifest::{
     CryptoParams, EmbeddingModelEntry, ManifestError, VaultManifest, FORMAT_VERSION,
 };
+pub use metadata::{MetadataMigrationError, MetadataMigrationReport};
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rusqlite::Connection;
 use thiserror::Error;
@@ -25,6 +29,12 @@ pub enum VaultError {
     BadPassphrase,
     #[error("vault is locked")]
     Locked,
+    #[error("vault metadata migration is required; run `tessera metadata migrate --yes`")]
+    MetadataMigrationRequired,
+    #[error("keyslot file no longer matches the keyslot state that unlocked this vault")]
+    KeyslotBindingMismatch,
+    #[error("in-memory keyslot binding state is unavailable")]
+    KeyslotStateUnavailable,
     #[error("manifest error: {0}")]
     Manifest(#[from] ManifestError),
     #[error("database error: {0}")]
@@ -54,6 +64,11 @@ pub struct Vault {
     conn: Connection,
     blobs: BlobStore,
     dek: Option<Dek>,
+    keyslot_digest: Mutex<[u8; 32]>,
+}
+
+fn keyslot_digest_at(path: &Path) -> Result<[u8; 32], VaultError> {
+    Ok(KeyslotFile::load_bound(path)?.1)
 }
 
 impl Vault {
@@ -71,13 +86,18 @@ impl Vault {
         if path.join("tessera.json").exists() {
             return Err(VaultError::AlreadyExists(path.to_path_buf()));
         }
-        std::fs::create_dir_all(path)?;
+        if let Err(error) = permissions::prepare_new_bundle(path) {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                return Err(VaultError::AlreadyExists(path.to_path_buf()));
+            }
+            return Err(error.into());
+        }
         for dir in ["receipts", "inbox"] {
-            std::fs::create_dir_all(path.join(dir))?;
+            permissions::create_bundle_directory(&path.join(dir))?;
         }
 
         let (keyslots, dek) = KeyslotFile::create(passphrase, params)?;
-        keyslots.save(&path.join("keyslot.bin"))?;
+        let keyslot_digest = keyslots.save_bound(&path.join("keyslot.bin"))?;
 
         let mut manifest = VaultManifest::new(chrono::Utc::now());
         manifest.crypto.kdf_m_cost_kib = params.m_cost_kib;
@@ -85,8 +105,12 @@ impl Vault {
         manifest.crypto.kdf_p_cost = params.p_cost;
         manifest.save(&path.join("tessera.json"))?;
 
-        let conn = crate::db::open_database(&path.join("vault.db"))?;
+        let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
+        permissions::file(&path.join("vault.db"))?;
+        metadata::initialize_from_manifest(&conn, &manifest)?;
         let blobs = BlobStore::open(&path.join("blobs"))?;
+        permissions::validate_bundle_layout(path)?;
+        permissions::harden_tree(path)?;
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -94,6 +118,7 @@ impl Vault {
             conn,
             blobs,
             dek: Some(dek),
+            keyslot_digest: Mutex::new(keyslot_digest),
         })
     }
 
@@ -103,12 +128,50 @@ impl Vault {
         if !manifest_path.is_file() {
             return Err(VaultError::NotFound(path.to_path_buf()));
         }
+        permissions::validate_bundle_layout(path)?;
+        permissions::harden_tree(path)?;
         let manifest = VaultManifest::load(&manifest_path)?;
+        if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(path) {
+            return Err(VaultError::MetadataMigrationRequired);
+        }
 
-        let keyslots = KeyslotFile::load(&path.join("keyslot.bin"))?;
+        let keyslot_path = path.join("keyslot.bin");
+        let (keyslots, keyslot_digest) = KeyslotFile::load_bound(&keyslot_path)?;
         let dek = keyslots.unlock(passphrase)?;
 
-        let conn = crate::db::open_database(&path.join("vault.db"))?;
+        Self::open_with_dek(path, dek, keyslot_digest)
+    }
+
+    /// Open a complete current-format bundle with an already authenticated
+    /// vault key. Used internally to validate a copied bundle before a backup
+    /// operation reports success.
+    pub(crate) fn open_with_dek(
+        path: &Path,
+        dek: Dek,
+        expected_keyslot_digest: [u8; 32],
+    ) -> Result<Self, VaultError> {
+        let manifest_path = path.join("tessera.json");
+        if !manifest_path.is_file() {
+            return Err(VaultError::NotFound(path.to_path_buf()));
+        }
+        permissions::validate_bundle_layout(path)?;
+        permissions::harden_tree(path)?;
+        let mut manifest = VaultManifest::load(&manifest_path)?;
+        if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(path) {
+            return Err(VaultError::MetadataMigrationRequired);
+        }
+        let keyslot_path = path.join("keyslot.bin");
+        let (keyslots, keyslot_digest) = KeyslotFile::load_bound(&keyslot_path)?;
+        if keyslot_digest != expected_keyslot_digest {
+            return Err(VaultError::KeyslotBindingMismatch);
+        }
+        // Parsing the exact copied keyslot bytes is part of bundle validation
+        // even though the already-authenticated DEK avoids retaining a
+        // passphrase during backup verification.
+        drop(keyslots);
+
+        let conn = crate::db::open_database(&path.join("vault.db"), &dek)?;
+        metadata::hydrate_manifest(&conn, &mut manifest)?;
         let blobs = BlobStore::open(&path.join("blobs"))?;
 
         Ok(Self {
@@ -117,6 +180,7 @@ impl Vault {
             conn,
             blobs,
             dek: Some(dek),
+            keyslot_digest: Mutex::new(keyslot_digest),
         })
     }
 
@@ -133,17 +197,29 @@ impl Vault {
     /// Add a recovery/rotation keyslot wrapping the existing DEK. Source blobs
     /// are not re-encrypted; every keyslot unlocks the same portable vault.
     pub fn add_keyslot(&self, passphrase: &str, params: &KdfParams) -> Result<usize, VaultError> {
-        let mut keyslots = KeyslotFile::load(&self.path.join("keyslot.bin"))?;
+        let keyslot_path = self.path.join("keyslot.bin");
+        let expected = self.keyslot_digest()?;
+        let (mut keyslots, actual) = KeyslotFile::load_bound(&keyslot_path)?;
+        if actual != expected {
+            return Err(VaultError::KeyslotBindingMismatch);
+        }
         keyslots.add_slot(self.dek()?, passphrase, params)?;
-        keyslots.save(&self.path.join("keyslot.bin"))?;
+        let digest = keyslots.save_bound(&keyslot_path)?;
+        self.set_keyslot_digest(digest)?;
         Ok(keyslots.slot_count() - 1)
     }
 
     /// Remove one keyslot. The keyslot layer refuses removal of the last slot.
     pub fn remove_keyslot(&self, index: usize) -> Result<(), VaultError> {
-        let mut keyslots = KeyslotFile::load(&self.path.join("keyslot.bin"))?;
+        let keyslot_path = self.path.join("keyslot.bin");
+        let expected = self.keyslot_digest()?;
+        let (mut keyslots, actual) = KeyslotFile::load_bound(&keyslot_path)?;
+        if actual != expected {
+            return Err(VaultError::KeyslotBindingMismatch);
+        }
         keyslots.remove_slot(index)?;
-        keyslots.save(&self.path.join("keyslot.bin"))?;
+        let digest = keyslots.save_bound(&keyslot_path)?;
+        self.set_keyslot_digest(digest)?;
         Ok(())
     }
 
@@ -155,8 +231,16 @@ impl Vault {
     /// supports concurrent in-process Guardian requests without retaining or
     /// re-reading the passphrase. Each duplicated DEK zeroizes on drop.
     pub fn reopen_unlocked(&self) -> Result<Self, VaultError> {
-        let manifest = VaultManifest::load(&self.path.join("tessera.json"))?;
-        let conn = crate::db::open_database(&self.path.join("vault.db"))?;
+        let expected_keyslot_digest = self.keyslot_digest()?;
+        if keyslot_digest_at(&self.path.join("keyslot.bin"))? != expected_keyslot_digest {
+            return Err(VaultError::KeyslotBindingMismatch);
+        }
+        let mut manifest = VaultManifest::load(&self.path.join("tessera.json"))?;
+        if manifest.format_version < FORMAT_VERSION || metadata::migration_in_progress(&self.path) {
+            return Err(VaultError::MetadataMigrationRequired);
+        }
+        let conn = crate::db::open_database(&self.path.join("vault.db"), self.dek()?)?;
+        metadata::hydrate_manifest(&conn, &mut manifest)?;
         let blobs = BlobStore::open(&self.path.join("blobs"))?;
         Ok(Self {
             path: self.path.clone(),
@@ -164,7 +248,23 @@ impl Vault {
             conn,
             blobs,
             dek: Some(self.dek()?.duplicate()),
+            keyslot_digest: Mutex::new(expected_keyslot_digest),
         })
+    }
+
+    pub(crate) fn keyslot_digest(&self) -> Result<[u8; 32], VaultError> {
+        self.keyslot_digest
+            .lock()
+            .map(|digest| *digest)
+            .map_err(|_| VaultError::KeyslotStateUnavailable)
+    }
+
+    fn set_keyslot_digest(&self, digest: [u8; 32]) -> Result<(), VaultError> {
+        *self
+            .keyslot_digest
+            .lock()
+            .map_err(|_| VaultError::KeyslotStateUnavailable)? = digest;
+        Ok(())
     }
 
     /// The unlocked DEK, or `VaultError::Locked`.
@@ -182,13 +282,38 @@ impl Vault {
         &self.manifest
     }
 
+    /// Embedding models registered inside protected vault metadata.
+    pub fn embedding_models(&self) -> Result<Vec<EmbeddingModelEntry>, VaultError> {
+        Ok(metadata::embedding_models(&self.conn)?)
+    }
+
+    pub(crate) fn register_embedding_model(
+        &self,
+        entry: EmbeddingModelEntry,
+    ) -> Result<(), VaultError> {
+        metadata::register_embedding_model(&self.conn, entry)?;
+        Ok(())
+    }
+
+    /// Explicitly convert a legacy vault to protected metadata format v3.
+    /// Ordinary `open` never performs this persistent-format transition.
+    pub fn migrate_metadata(
+        path: &Path,
+        passphrase: &str,
+    ) -> Result<MetadataMigrationReport, MetadataMigrationError> {
+        metadata::migrate(path, passphrase)
+    }
+
     /// Persist a supported format transition and keep this open handle in
     /// sync. Receipt migration is the sole production caller.
     pub(crate) fn set_format_version_for_migration(
         &mut self,
         version: u32,
     ) -> Result<(), VaultError> {
-        if version == 0 || version > FORMAT_VERSION {
+        if version == 0
+            || version > FORMAT_VERSION
+            || (version < self.manifest.format_version && !cfg!(test))
+        {
             return Err(VaultError::Manifest(ManifestError::UnsupportedVersion {
                 found: version,
                 supported: FORMAT_VERSION,
@@ -255,6 +380,7 @@ mod tests {
         let reopened = Vault::open(&path, "passphrase").expect("open");
         assert!(!reopened.is_locked());
         assert_eq!(reopened.manifest().format_version, FORMAT_VERSION);
+        assert!(reopened.manifest().created_at.is_some());
     }
 
     #[test]
@@ -268,6 +394,29 @@ mod tests {
             Vault::create_with_params(&path, "other", &TEST_PARAMS),
             Err(VaultError::AlreadyExists(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_preseeded_component_symlinks_without_writing_through_them() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Preseeded.tessera");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&path).expect("bundle target");
+        std::fs::create_dir(&outside).expect("outside target");
+        symlink(&outside, path.join("blobs")).expect("preseed blob symlink");
+
+        assert!(matches!(
+            Vault::create_with_params(&path, "passphrase", &TEST_PARAMS),
+            Err(VaultError::AlreadyExists(_))
+        ));
+        assert!(std::fs::read_dir(&outside)
+            .expect("outside remains readable")
+            .next()
+            .is_none());
+        assert!(!path.join("tessera.json").exists());
     }
 
     #[test]
@@ -372,6 +521,20 @@ mod tests {
         vault.lock();
         assert!(vault.is_locked());
         assert!(matches!(vault.dek(), Err(VaultError::Locked)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symbolic_links_inside_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = create_vault(dir.path()).path().to_path_buf();
+        let original = path.join("blobs");
+        let relocated = path.join("real-blobs");
+        std::fs::rename(&original, &relocated).expect("relocate blobs");
+        symlink(&relocated, &original).expect("symlink fixture");
+        assert!(Vault::open(&path, "passphrase").is_err());
     }
 
     fn copy_dir(from: &Path, to: &Path) {

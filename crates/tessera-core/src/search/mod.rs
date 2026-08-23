@@ -330,27 +330,19 @@ pub fn embed_missing(
         count += 1;
     }
 
-    // Record the model in the manifest registry so a fresh guardian on
-    // another machine knows what produced these vectors.
-    let manifest_path = vault.path().join("tessera.json");
-    let mut manifest =
-        crate::vault::VaultManifest::load(&manifest_path).map_err(VaultError::Manifest)?;
+    // Record the model inside protected vault metadata so a fresh guardian on
+    // another machine knows what produced these vectors after unlock.
     let version = embedder.model_version();
-    if !manifest
-        .embedding_models
+    if !vault
+        .embedding_models()?
         .iter()
         .any(|m| m.version == version)
     {
-        manifest
-            .embedding_models
-            .push(crate::vault::EmbeddingModelEntry {
-                name: version.split('@').next().unwrap_or(version).to_owned(),
-                version: version.to_owned(),
-                dimensions: embedder.dimensions() as u32,
-            });
-        manifest
-            .save(&manifest_path)
-            .map_err(VaultError::Manifest)?;
+        vault.register_embedding_model(crate::vault::EmbeddingModelEntry {
+            name: version.split('@').next().unwrap_or(version).to_owned(),
+            version: version.to_owned(),
+            dimensions: embedder.dimensions() as u32,
+        })?;
     }
     Ok(count)
 }
@@ -654,19 +646,17 @@ mod tests {
     }
 
     #[test]
-    fn embed_missing_registers_model_in_manifest() {
+    fn embed_missing_registers_model_in_protected_metadata() {
         let (_dir, vault) = corpus();
         embed_missing(&vault, &FakeEmbedder).expect("embed");
 
-        let manifest =
-            crate::vault::VaultManifest::load(&vault.path().join("tessera.json")).expect("load");
+        let models = vault.embedding_models().expect("model registry");
         assert!(
-            manifest
-                .embedding_models
+            models
                 .iter()
                 .any(|m| m.version == "fake-trigram@1" && m.dimensions == 384),
             "model registry missing entry: {:?}",
-            manifest.embedding_models
+            models
         );
     }
 

@@ -43,6 +43,41 @@ fn init_refuses_existing_vault() {
 }
 
 #[test]
+fn metadata_migration_requires_confirmation_and_current_format_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("V.tessera");
+    tessera(&vault).args(["init"]).assert().success();
+
+    tessera(&vault)
+        .args(["metadata", "migrate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("re-run with --yes"));
+    tessera(&vault)
+        .args(["metadata", "migrate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already protected at format v3"));
+
+    std::fs::write(vault.join(".metadata-migration-v3"), b"{malformed")
+        .expect("inject malformed migration marker");
+    tessera(&vault)
+        .args(["metadata", "migrate", "--yes"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("metadata migration failed (invalid_state)")
+                .and(predicate::str::contains(
+                    "preserve the bundle and offline copy",
+                ))
+                .and(predicate::str::contains("do not edit migration files"))
+                .and(predicate::str::contains("re-run metadata migrate --yes"))
+                .and(predicate::str::contains("{malformed").not())
+                .and(predicate::str::contains(vault.display().to_string()).not()),
+        );
+}
+
+#[test]
 fn keyslot_listing_and_removal_guard_are_owner_visible() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vault = dir.path().join("V.tessera");

@@ -32,8 +32,6 @@ chrono = { workspace = true }
 ulid = { workspace = true }
 security-framework = { workspace = true }
 zeroize = { workspace = true }
-# runtime use: temp files for pandoc DOCX interop (extract module)
-tempfile = { workspace = true }
 
 # macOS-native decode (HEIC) and OCR. The image pipeline keeps every other
 # stage portable; only these two stages bind to platform frameworks.
@@ -48,3 +46,4 @@ objc2-image-io = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tokio-test = { workspace = true }
+tempfile = { workspace = true }

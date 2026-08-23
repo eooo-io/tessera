@@ -74,3 +74,108 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
+
+  portability-export-macos:
+    name: Export protected vault (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.97.0
+
+      - name: Locate clang runtime for ort-sys
+        run: |
+          lib=$(find "$(xcode-select -p)" /Library/Developer/CommandLineTools \
+                -name 'libclang_rt.osx.a' 2>/dev/null | head -1)
+          if [ -n "$lib" ]; then
+            echo "RUSTFLAGS=-D warnings -L $(dirname "$lib")" >> "$GITHUB_ENV"
+          else
+            echo "::error::libclang_rt.osx.a not found on runner"
+            exit 1
+          fi
+
+      - name: Export and locally verify synthetic protected backup
+        env:
+          TESSERA_PORTABILITY_EXPORT: ${{ runner.temp }}/portable-macos.tessera
+        run: cargo test -p tessera-core --test metadata_portability export_portable_fixture -- --exact --nocapture
+
+      - name: Archive protected bundle
+        run: tar -czf "${{ runner.temp }}/portable-macos.tessera.tar.gz" -C "${{ runner.temp }}" portable-macos.tessera
+
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-vault-macos
+          path: ${{ runner.temp }}/portable-macos.tessera.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  portability-bridge-ubuntu:
+    name: Open macOS vault and export Ubuntu vault
+    needs: portability-export-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.97.0
+
+      - name: Download macOS bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: portable-vault-macos
+          path: ${{ runner.temp }}/incoming-macos
+
+      - name: Open macOS bundle and export Ubuntu bundle
+        run: |
+          tar -xzf "${{ runner.temp }}/incoming-macos/portable-macos.tessera.tar.gz" -C "${{ runner.temp }}"
+          TESSERA_PORTABILITY_IMPORT="${{ runner.temp }}/portable-macos.tessera" cargo test -p tessera-core --test metadata_portability import_portable_fixture -- --exact --nocapture
+          TESSERA_PORTABILITY_EXPORT="${{ runner.temp }}/portable-ubuntu.tessera" cargo test -p tessera-core --test metadata_portability export_portable_fixture -- --exact --nocapture
+          tar -czf "${{ runner.temp }}/portable-ubuntu.tessera.tar.gz" -C "${{ runner.temp }}" portable-ubuntu.tessera
+
+      - name: Upload Ubuntu bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-vault-ubuntu
+          path: ${{ runner.temp }}/portable-ubuntu.tessera.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  portability-verify-macos:
+    name: Open Ubuntu vault (macOS)
+    needs: portability-bridge-ubuntu
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.97.0
+
+      - name: Locate clang runtime for ort-sys
+        run: |
+          lib=$(find "$(xcode-select -p)" /Library/Developer/CommandLineTools \
+                -name 'libclang_rt.osx.a' 2>/dev/null | head -1)
+          if [ -n "$lib" ]; then
+            echo "RUSTFLAGS=-D warnings -L $(dirname "$lib")" >> "$GITHUB_ENV"
+          else
+            echo "::error::libclang_rt.osx.a not found on runner"
+            exit 1
+          fi
+
+      - name: Download Ubuntu bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: portable-vault-ubuntu
+          path: ${{ runner.temp }}/incoming-ubuntu
+
+      - name: Open Ubuntu bundle
+        run: |
+          tar -xzf "${{ runner.temp }}/incoming-ubuntu/portable-ubuntu.tessera.tar.gz" -C "${{ runner.temp }}"
+          TESSERA_PORTABILITY_IMPORT="${{ runner.temp }}/portable-ubuntu.tessera" cargo test -p tessera-core --test metadata_portability import_portable_fixture -- --exact --nocapture

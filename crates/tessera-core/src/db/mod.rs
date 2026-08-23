@@ -7,12 +7,20 @@ use std::path::Path;
 use rusqlite::Connection;
 use thiserror::Error;
 
+use crate::crypto::Dek;
+
 #[derive(Error, Debug)]
 pub enum DbError {
     #[error("migration failed: {0}")]
     MigrationFailed(String),
     #[error("query failed: {0}")]
     QueryFailed(#[from] rusqlite::Error),
+    #[error("database io failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("database encryption is unavailable")]
+    EncryptionUnavailable,
+    #[error("database key or protected metadata is invalid")]
+    InvalidProtectedDatabase,
 }
 
 /// Register the sqlite-vec extension for every future connection in this
@@ -30,15 +38,157 @@ fn register_vec_extension() {
     });
 }
 
-/// Open (or create) the vault database: sqlite-vec available, WAL mode,
-/// foreign keys on, all pending migrations applied.
-pub fn open_database(path: &Path) -> Result<Connection, DbError> {
+/// Open a legacy plaintext database. This exists only for explicit format-v3
+/// migration and tests; ordinary vault operation must use [`open_database`].
+pub(crate) fn open_plaintext_database(path: &Path) -> Result<Connection, DbError> {
     register_vec_extension();
     let conn = Connection::open(path)?;
+    crate::vault::permissions::file(path)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(conn)
+}
+
+/// Export a checkpointed legacy plaintext database to a new SQLCipher file.
+/// The raw key is installed on the attached destination before the first
+/// destination write; the source connection itself remains unkeyed.
+pub(crate) fn export_plaintext_to_encrypted(
+    source: &Connection,
+    destination: &Path,
+    key: &[u8; 32],
+) -> Result<(), DbError> {
+    if destination.exists() {
+        return Err(DbError::MigrationFailed(
+            "protected database staging path already exists".into(),
+        ));
+    }
+    let destination = destination.to_str().ok_or_else(|| {
+        DbError::MigrationFailed("protected database path is not valid UTF-8".into())
+    })?;
+    source.execute("ATTACH DATABASE ?1 AS protected KEY ''", [destination])?;
+    if let Err(error) = install_raw_key_for_schema(source, "protected", key) {
+        let _ = source.execute_batch("DETACH DATABASE protected");
+        return Err(error);
+    }
+    let result = (|| -> Result<(), DbError> {
+        source.query_row("SELECT sqlcipher_export('protected')", [], |_| Ok(()))?;
+        source.execute_batch("DETACH DATABASE protected")?;
+        let destination_path = Path::new(destination);
+        std::fs::File::open(destination_path)?.sync_all()?;
+        if let Some(parent) = destination_path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = source.execute_batch("DETACH DATABASE protected");
+    }
+    result
+}
+
+/// Open (or create) the protected vault database using a domain-separated key.
+pub fn open_database(path: &Path, dek: &Dek) -> Result<Connection, DbError> {
+    let key = dek.database_encryption_key();
+    open_encrypted_database(path, &key)
+}
+
+/// Open or create a SQLCipher-protected database with a 256-bit high-entropy
+/// secret.
+///
+/// The key is installed before the first database read. Existing files are
+/// immediately read to prove the key and format before any mutating PRAGMA or
+/// migration can run. Non-transaction temporary stores are forced to memory.
+pub fn open_encrypted_database(path: &Path, key: &[u8; 32]) -> Result<Connection, DbError> {
+    register_vec_extension();
+    let existed = path.is_file();
+    if existed && std::fs::metadata(path)?.len() < 16 {
+        return Err(DbError::InvalidProtectedDatabase);
+    }
+    let conn = Connection::open(path)?;
+    crate::vault::permissions::file(path)?;
+    install_raw_key(&conn, key)?;
+
+    let cipher_version: String = conn
+        .query_row("PRAGMA cipher_version", [], |row| row.get(0))
+        .map_err(|_| DbError::EncryptionUnavailable)?;
+    if cipher_version.trim().is_empty() {
+        return Err(DbError::EncryptionUnavailable);
+    }
+
+    let readable = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    if readable.is_err() && existed {
+        return Err(DbError::InvalidProtectedDatabase);
+    }
+    readable?;
+
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrations::run_migrations(&conn)?;
     Ok(conn)
+}
+
+fn install_raw_key(conn: &Connection, key: &[u8; 32]) -> Result<(), DbError> {
+    // SAFETY: `conn.handle()` is valid for the lifetime of `conn`; SQLCipher
+    // copies the exact key bytes during this call. The pointer and length match
+    // the fixed-size slice, and this is the first operation after open.
+    let status = unsafe {
+        rusqlite::ffi::sqlite3_key(
+            conn.handle(),
+            key.as_ptr().cast::<std::ffi::c_void>(),
+            key.len() as std::ffi::c_int,
+        )
+    };
+    if status != rusqlite::ffi::SQLITE_OK {
+        return Err(DbError::InvalidProtectedDatabase);
+    }
+    Ok(())
+}
+
+fn install_raw_key_for_schema(
+    conn: &Connection,
+    schema: &str,
+    key: &[u8; 32],
+) -> Result<(), DbError> {
+    let schema = std::ffi::CString::new(schema)
+        .map_err(|_| DbError::MigrationFailed("invalid database schema name".into()))?;
+    // SAFETY: the connection and schema C string are live for this call and
+    // SQLCipher copies the fixed-size key bytes.
+    let status = unsafe {
+        rusqlite::ffi::sqlite3_key_v2(
+            conn.handle(),
+            schema.as_ptr(),
+            key.as_ptr().cast::<std::ffi::c_void>(),
+            key.len() as std::ffi::c_int,
+        )
+    };
+    if status != rusqlite::ffi::SQLITE_OK {
+        return Err(DbError::InvalidProtectedDatabase);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn export_encrypted_to_plaintext_test(
+    source: &Connection,
+    destination: &Path,
+) -> Result<(), DbError> {
+    let destination = destination.to_str().ok_or_else(|| {
+        DbError::MigrationFailed("plaintext test database path is not valid UTF-8".into())
+    })?;
+    source.execute("ATTACH DATABASE ?1 AS legacy_plain KEY ''", [destination])?;
+    let result = (|| -> Result<(), DbError> {
+        source.query_row("SELECT sqlcipher_export('legacy_plain')", [], |_| Ok(()))?;
+        source.execute_batch("DETACH DATABASE legacy_plain")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = source.execute_batch("DETACH DATABASE legacy_plain");
+    }
+    result
 }
 
 #[cfg(test)]
@@ -47,7 +197,8 @@ mod tests {
 
     fn open_temp() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let conn = open_database(&dir.path().join("vault.db")).expect("open");
+        let conn =
+            open_encrypted_database(&dir.path().join("vault.db"), &[0x42; 32]).expect("open");
         (dir, conn)
     }
 
@@ -64,6 +215,84 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
             .expect("foreign_keys");
         assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn encrypted_database_rejects_wrong_key_and_plaintext_scans() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.db");
+        let correct = [0x11; 32];
+        let wrong = [0x22; 32];
+        let sentinel = "DB-METADATA-SENTINEL-ISSUE-50";
+
+        let conn = open_encrypted_database(&path, &correct).expect("create encrypted");
+        conn.execute(
+            "INSERT INTO spaces (id, name, created_at, updated_at) VALUES ('space', ?1, 'now', 'now')",
+            [sentinel],
+        )
+        .expect("insert sentinel");
+        let wal = std::fs::read(path.with_extension("db-wal")).expect("read protected WAL");
+        assert!(!wal
+            .windows(sentinel.len())
+            .any(|bytes| bytes == sentinel.as_bytes()));
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint");
+        drop(conn);
+
+        let raw = std::fs::read(&path).expect("read raw database");
+        assert!(!raw
+            .windows(sentinel.len())
+            .any(|bytes| bytes == sentinel.as_bytes()));
+        assert!(open_encrypted_database(&path, &wrong).is_err());
+    }
+
+    #[test]
+    fn protected_open_rejects_plaintext_truncated_and_tampered_files() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let plaintext = directory.path().join("plaintext.db");
+        let plaintext_conn = rusqlite::Connection::open(&plaintext).expect("plaintext open");
+        plaintext_conn
+            .execute_batch("CREATE TABLE private_sentinel(value TEXT);")
+            .expect("plaintext schema");
+        drop(plaintext_conn);
+        assert!(matches!(
+            open_encrypted_database(&plaintext, &[0x31; 32]),
+            Err(DbError::InvalidProtectedDatabase)
+        ));
+
+        let truncated = directory.path().join("truncated.db");
+        std::fs::write(&truncated, b"short").expect("truncated fixture");
+        assert!(matches!(
+            open_encrypted_database(&truncated, &[0x31; 32]),
+            Err(DbError::InvalidProtectedDatabase)
+        ));
+
+        let tampered = directory.path().join("tampered.db");
+        let conn = open_encrypted_database(&tampered, &[0x31; 32]).expect("protected fixture");
+        conn.execute(
+            "INSERT INTO spaces (id, name, created_at, updated_at)
+             VALUES ('space', 'tamper target', 'now', 'now')",
+            [],
+        )
+        .expect("insert");
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint");
+        drop(conn);
+        let mut bytes = std::fs::read(&tampered).expect("read protected");
+        bytes[100] ^= 0xff;
+        std::fs::write(&tampered, bytes).expect("tamper");
+        assert!(open_encrypted_database(&tampered, &[0x31; 32]).is_err());
+    }
+
+    #[test]
+    fn encrypted_database_keeps_sqlite_temp_store_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_encrypted_database(&dir.path().join("vault.db"), &[0x33; 32])
+            .expect("open encrypted");
+        let temp_store: i64 = conn
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .expect("temp_store");
+        assert_eq!(temp_store, 2);
     }
 
     #[test]
@@ -127,14 +356,14 @@ mod tests {
                 .collect()
         };
 
-        let conn = open_database(&path).expect("first open");
+        let conn = open_encrypted_database(&path, &[0x42; 32]).expect("first open");
         let first = schema_dump(&conn);
         let applied_first: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .expect("count");
         drop(conn);
 
-        let conn = open_database(&path).expect("second open");
+        let conn = open_encrypted_database(&path, &[0x42; 32]).expect("second open");
         let second = schema_dump(&conn);
         let applied_second: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))

@@ -1835,7 +1835,10 @@ mod tests {
         let (_directory, vault, space_id, source_version_id, archive) = setup();
         vault
             .blobs()
-            .delete(&BlobHash(archive.source.source_hash.clone()))
+            .delete(
+                vault.dek().expect("unlocked fixture"),
+                &BlobHash(archive.source.source_hash.clone()),
+            )
             .expect("remove source fixture");
         assert!(matches!(
             persist_archive(

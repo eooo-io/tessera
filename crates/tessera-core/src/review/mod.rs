@@ -88,8 +88,9 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 /// Record one bounded active processing error, superseding an older error for
-/// the same artifact/stage. Error metadata is plaintext and must not include
-/// source content, credentials, or secrets.
+/// the same artifact/stage. Error metadata is protected in the format-v3
+/// database, but remains bounded and must not include source content,
+/// credentials, or secrets when the vault is unlocked.
 pub fn record_processing_error(
     vault: &Vault,
     artifact: &ArtifactId,
@@ -154,7 +155,9 @@ pub fn inspect(
     let artifact = artifact::get(vault, artifact_id)?;
     let (version_id, version, original_blob_hash, original_size_bytes) =
         latest_version(vault, artifact_id)?;
-    let encrypted_original_present = vault.blobs().exists(&BlobHash(original_blob_hash.clone()));
+    let encrypted_original_present = vault
+        .blobs()
+        .exists(vault.dek()?, &BlobHash(original_blob_hash.clone()));
 
     let derived = vault
         .conn()

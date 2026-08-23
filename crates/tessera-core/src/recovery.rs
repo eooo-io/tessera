@@ -84,6 +84,8 @@ pub enum RecoveryError {
     ActiveSessions(usize),
     #[error("backup refused because source diagnostics contain fatal integrity findings")]
     SourceFatal,
+    #[error("backup destination failed post-copy integrity verification")]
+    DestinationFatal,
     #[error("derived rebuild refused because diagnostics contain fatal integrity findings")]
     RebuildFatal,
 }
@@ -105,6 +107,8 @@ fn scalar(conn: &rusqlite::Connection, sql: &str) -> Result<usize, rusqlite::Err
 /// Check all durable trust boundaries without returning decrypted content.
 pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
     let conn = vault.conn();
+    let mut hydrated = vault.manifest().clone();
+    crate::vault::metadata::hydrate_manifest(conn, &mut hydrated)?;
     let quick: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     let fk = scalar(conn, "SELECT COUNT(*) FROM pragma_foreign_key_check")?;
 
@@ -150,6 +154,10 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
         .chain(provenance_hashes.iter())
         .cloned()
         .collect();
+    let referenced_addresses: HashSet<String> = referenced_blobs
+        .iter()
+        .map(|hash| vault.blobs().opaque_address(dek, &BlobHash(hash.clone())))
+        .collect();
     let mut orphan_blobs = 0;
     for shard in std::fs::read_dir(vault.path().join("blobs"))? {
         let shard = shard?;
@@ -162,7 +170,7 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.len() == 64 && !referenced_blobs.contains(&name) {
+            if name.len() == 64 && !referenced_addresses.contains(&name) {
                 orphan_blobs += 1;
             }
         }
@@ -226,8 +234,7 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
         "SELECT COUNT(*) FROM chunk_embeddings WHERE length(embedding) != 1536",
     )?;
     let registered_models: HashSet<String> = vault
-        .manifest()
-        .embedding_models
+        .embedding_models()?
         .iter()
         .map(|model| model.version.clone())
         .collect();
@@ -277,7 +284,7 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
     let orphaned_derivations = crate::provenance::orphaned_derivations(vault)
         .map(|items| items.len())
         .unwrap_or(1);
-    let receipt_failure = crate::receipt::verify(vault).is_err() as usize;
+    let receipt_failure = crate::receipt::verify_for_diagnostics(vault).is_err() as usize;
 
     let mut checks = vec![
         check(
@@ -423,9 +430,15 @@ pub fn diagnose(vault: &Vault) -> Result<IntegrityReport, RecoveryError> {
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(destination)?;
+    crate::vault::permissions::directory(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        if entry.file_type()?.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "symbolic links are not permitted in a portable vault backup",
+            ));
+        }
         let target = destination.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;
@@ -439,6 +452,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
 
 fn copy_file_synced(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
     std::fs::copy(source, destination)?;
+    crate::vault::permissions::file(destination)?;
     std::fs::File::open(destination)?.sync_all()
 }
 
@@ -446,6 +460,13 @@ fn copy_file_synced(source: &Path, destination: &Path) -> Result<(), std::io::Er
 /// an immediate DB barrier blocks concurrent writers while immutable/authenticated
 /// files and a SQLite online-backup snapshot are copied.
 pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
+    backup_at(vault, destination, || Ok(()))
+}
+
+fn backup_at<F>(vault: &Vault, destination: &Path, before_barrier: F) -> Result<(), RecoveryError>
+where
+    F: FnOnce() -> Result<(), RecoveryError>,
+{
     if destination.exists() {
         return Err(RecoveryError::DestinationExists(destination.to_path_buf()));
     }
@@ -484,13 +505,22 @@ pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
             .unwrap_or("vault"),
         std::process::id()
     ));
+    before_barrier()?;
     // Use a dedicated connection for the writer barrier. SQLite's online
     // backup API cannot advance when its own source connection holds a write
     // transaction, but a sibling reader can snapshot while this connection
     // excludes every other writer.
-    let barrier = crate::db::open_database(&vault.path().join("vault.db"))?;
+    let barrier = crate::db::open_database(&vault.path().join("vault.db"), vault.dek()?)?;
     barrier.execute_batch("BEGIN IMMEDIATE")?;
-    std::fs::create_dir(&staging)?;
+    let active = scalar(
+        &barrier,
+        "SELECT COUNT(*) FROM sessions
+         WHERE status = 'active' AND julianday(expires_at) > julianday('now')",
+    )?;
+    if active > 0 {
+        return Err(RecoveryError::ActiveSessions(active));
+    }
+    crate::vault::permissions::directory(&staging)?;
     let result = (|| -> Result<(), RecoveryError> {
         for file in ["tessera.json", "keyslot.bin"] {
             copy_file_synced(&vault.path().join(file), &staging.join(file))?;
@@ -498,13 +528,21 @@ pub fn backup(vault: &Vault, destination: &Path) -> Result<(), RecoveryError> {
         for dir in ["blobs", "receipts", "inbox"] {
             copy_tree(&vault.path().join(dir), &staging.join(dir))?;
         }
-        let mut destination_db = rusqlite::Connection::open(staging.join("vault.db"))?;
+        let database_key = vault.dek()?.database_encryption_key();
+        let mut destination_db =
+            crate::db::open_encrypted_database(&staging.join("vault.db"), &database_key)?;
         let snapshot = rusqlite::backup::Backup::new(vault.conn(), &mut destination_db)?;
         snapshot.run_to_completion(128, Duration::from_millis(10), None)?;
         drop(snapshot);
         destination_db.close().map_err(|(_, error)| error)?;
         std::fs::File::open(staging.join("vault.db"))?.sync_all()?;
         std::fs::File::open(&staging)?.sync_all()?;
+        let verified =
+            Vault::open_with_dek(&staging, vault.dek()?.duplicate(), vault.keyslot_digest()?)?;
+        if diagnose(&verified)?.has_fatal() {
+            return Err(RecoveryError::DestinationFatal);
+        }
+        drop(verified);
         Ok(())
     })();
     let _ = barrier.execute_batch("ROLLBACK");
@@ -779,7 +817,7 @@ mod tests {
             .expect("hash");
         vault
             .blobs()
-            .delete(&BlobHash(hash))
+            .delete(vault.dek().expect("dek"), &BlobHash(hash))
             .expect("fault injection");
 
         let report = diagnose(&vault).expect("diagnose");
@@ -958,6 +996,115 @@ mod tests {
     }
 
     #[test]
+    fn backup_rechecks_sessions_after_acquiring_its_writer_barrier() {
+        let (dir, vault, _artifact_id) = vault_with_original();
+        let space_id = crate::space::list(&vault).expect("spaces")[0].id.clone();
+        let lens = crate::lens::LensPolicy::new("Racing backup lens", vec![space_id]);
+        let lens_id = crate::lens::create(&vault, &lens).expect("lens");
+        let pairing = crate::pairing::approve(&vault, &lens_id, "backup race", "racing-agent", 5)
+            .expect("pairing");
+        let destination = dir.path().join("RaceBlocked.tessera");
+
+        let error = backup_at(&vault, &destination, || {
+            crate::session::start(&vault, &pairing).expect("session wins initial-check race");
+            Ok(())
+        })
+        .expect_err("barrier recheck must refuse raced session");
+        assert!(matches!(error, RecoveryError::ActiveSessions(1)));
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_backup_removes_private_staging_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, vault, _artifact_id) = vault_with_original();
+        let external = dir.path().join("external-plaintext.txt");
+        std::fs::write(&external, b"synthetic external content").expect("external fixture");
+        let injected = vault.path().join("inbox/unsafe-link");
+        symlink(&external, &injected).expect("inject source symlink");
+        let destination = dir.path().join("MustNotComplete.tessera");
+
+        assert!(backup(&vault, &destination).is_err());
+        assert!(!destination.exists());
+        assert!(injected.is_symlink());
+        let staging_prefix = format!(
+            ".{}.backup-staging-",
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("destination name")
+        );
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("backup parent")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&staging_prefix)),
+            "failed backup left a staging bundle"
+        );
+    }
+
+    #[test]
+    fn backup_refuses_a_structurally_valid_swapped_keyslot_file() {
+        let (dir, vault, _artifact_id) = vault_with_original();
+        let foreign_path = dir.path().join("Foreign.tessera");
+        let foreign = Vault::create_with_params(&foreign_path, "foreign-pass", &TEST_PARAMS)
+            .expect("foreign vault");
+        drop(foreign);
+        std::fs::copy(
+            foreign_path.join("keyslot.bin"),
+            vault.path().join("keyslot.bin"),
+        )
+        .expect("swap structurally valid keyslot");
+        let destination = dir.path().join("MustNotPublish.tessera");
+
+        assert!(matches!(
+            backup(&vault, &destination),
+            Err(RecoveryError::Vault(
+                crate::vault::VaultError::KeyslotBindingMismatch
+            ))
+        ));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn keyslot_mutation_cannot_launder_a_foreign_file_into_backup_binding() {
+        let (dir, vault, _artifact_id) = vault_with_original();
+        vault
+            .add_keyslot("source-recovery", &TEST_PARAMS)
+            .expect("source recovery slot");
+        let foreign_path = dir.path().join("ForeignTwoSlot.tessera");
+        let foreign = Vault::create_with_params(&foreign_path, "foreign", &TEST_PARAMS)
+            .expect("foreign vault");
+        foreign
+            .add_keyslot("foreign-recovery", &TEST_PARAMS)
+            .expect("foreign recovery slot");
+        drop(foreign);
+        std::fs::copy(
+            foreign_path.join("keyslot.bin"),
+            vault.path().join("keyslot.bin"),
+        )
+        .expect("swap foreign two-slot file");
+
+        assert!(matches!(
+            vault.remove_keyslot(0),
+            Err(crate::vault::VaultError::KeyslotBindingMismatch)
+        ));
+        let destination = dir.path().join("MustRemainUnpublished.tessera");
+        assert!(matches!(
+            backup(&vault, &destination),
+            Err(RecoveryError::Vault(
+                crate::vault::VaultError::KeyslotBindingMismatch
+            ))
+        ));
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn orphaned_ciphertext_is_reported_and_not_deleted() {
         let (_dir, vault, _artifact_id) = vault_with_original();
         let orphan = vault
@@ -976,7 +1123,7 @@ mod tests {
         assert_eq!(orphan_check.class, IntegrityClass::Repairable);
         assert_eq!(orphan_check.affected, 1);
         assert!(
-            vault.blobs().exists(&orphan),
+            vault.blobs().exists(vault.dek().expect("dek"), &orphan),
             "diagnostics must not delete evidence"
         );
     }

@@ -101,9 +101,8 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
         IpAddr::V4(address) => address.to_string(),
         IpAddr::V6(address) => format!("[{address}]"),
     };
-    let directory = tempfile::tempdir()?;
-    let body_path = directory.path().join("article.html");
-    let headers_path = directory.path().join("headers.txt");
+    let trailer = format!("\nTESSERA_CURL_TRAILER_{}\n", ulid::Ulid::new());
+    let write_out = format!("{trailer}%{{http_code}}\n%{{content_type}}");
     let output = Command::new("curl")
         .args([
             "--disable",
@@ -127,12 +126,8 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
             "Accept-Encoding: identity",
             "--resolve",
             &format!("{host}:{port}:{resolved}"),
-            "--dump-header",
-            headers_path.to_str().expect("temporary UTF-8 path"),
-            "--output",
-            body_path.to_str().expect("temporary UTF-8 path"),
             "--write-out",
-            "%{http_code}",
+            &write_out,
             url.as_str(),
         ])
         .output()
@@ -143,35 +138,21 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
             output.status
         )));
     }
-    let status: u16 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .map_err(|_| WebError::Fetch("curl returned an invalid HTTP status".into()))?;
+    let (bytes, status, content_type) = split_curl_output(&output.stdout, trailer.as_bytes())?;
     if !(200..300).contains(&status) {
         return Err(WebError::Fetch(format!(
             "HTTP {status}; redirects are not followed, provide the canonical article URL"
         )));
     }
-    let headers = std::fs::read_to_string(&headers_path)?;
-    let content_type = headers.lines().rev().find_map(|line| {
-        line.split_once(':').and_then(|(name, value)| {
-            name.eq_ignore_ascii_case("content-type")
-                .then(|| value.trim().to_ascii_lowercase())
-        })
-    });
-    if !content_type
-        .as_deref()
-        .is_some_and(|value| value.starts_with("text/html"))
-    {
+    if !content_type.to_ascii_lowercase().starts_with("text/html") {
         return Err(WebError::Fetch(
             "response Content-Type is not text/html".into(),
         ));
     }
-    let bytes = std::fs::read(body_path)?;
     if bytes.len() as u64 > MAX_HTML_BYTES {
         return Err(WebError::Fetch("response exceeds 10 MiB limit".into()));
     }
-    let html = String::from_utf8(bytes)
+    let html = String::from_utf8(bytes.to_vec())
         .map_err(|_| WebError::Fetch("response is not UTF-8 HTML".into()))?;
     let article = extract_article(&html, url.as_str())?;
     Ok(FetchedArticle {
@@ -180,6 +161,30 @@ pub fn fetch_article(input: &str) -> Result<FetchedArticle, WebError> {
         fetched_at: chrono::Utc::now().to_rfc3339(),
         article,
     })
+}
+
+fn split_curl_output<'a>(
+    output: &'a [u8],
+    trailer: &[u8],
+) -> Result<(&'a [u8], u16, String), WebError> {
+    let boundary = output
+        .windows(trailer.len())
+        .rposition(|window| window == trailer)
+        .ok_or_else(|| WebError::Fetch("curl returned no metadata trailer".into()))?;
+    let metadata = std::str::from_utf8(&output[boundary + trailer.len()..])
+        .map_err(|_| WebError::Fetch("curl returned invalid response metadata".into()))?;
+    let mut lines = metadata.lines();
+    let status = lines
+        .next()
+        .ok_or_else(|| WebError::Fetch("curl returned no HTTP status".into()))?
+        .parse()
+        .map_err(|_| WebError::Fetch("curl returned an invalid HTTP status".into()))?;
+    let content_type = lines
+        .next()
+        .ok_or_else(|| WebError::Fetch("curl returned no content type".into()))?
+        .trim()
+        .to_owned();
+    Ok((&output[..boundary], status, content_type))
 }
 
 fn validate_public_url(input: &str) -> Result<(Url, IpAddr), WebError> {
@@ -296,6 +301,7 @@ pub fn stage_article(vault: &Vault, fetched: &FetchedArticle) -> Result<PathBuf,
     markdown.push_str(fetched.article.markdown.trim());
     markdown.push('\n');
     std::fs::write(&partial, markdown)?;
+    crate::vault::permissions::file(&partial)?;
     std::fs::File::open(&partial)?.sync_all()?;
     let inserted = vault.conn().execute(
         "INSERT INTO web_staging
@@ -323,6 +329,7 @@ pub fn stage_article(vault: &Vault, fetched: &FetchedArticle) -> Result<PathBuf,
         return Err(error.into());
     }
     std::fs::File::open(&inbox)?.sync_all()?;
+    crate::vault::permissions::file(&target)?;
     Ok(target)
 }
 
@@ -430,6 +437,23 @@ mod tests {
             validate_public_url("file:///etc/passwd"),
             Err(WebError::InvalidUrl(_))
         ));
+    }
+
+    #[test]
+    fn curl_metadata_trailer_keeps_body_and_headers_in_memory() {
+        let marker = b"\nTESSERA_CURL_TRAILER_SYNTHETIC\n";
+        let mut output =
+            b"body containing an earlier \nTESSERA_CURL_TRAILER_SYNTHETIC\n marker".to_vec();
+        output.extend_from_slice(marker);
+        output.extend_from_slice(b"200\ntext/html; charset=utf-8");
+        let (body, status, content_type) =
+            split_curl_output(&output, marker).expect("split trailer");
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(
+            body,
+            b"body containing an earlier \nTESSERA_CURL_TRAILER_SYNTHETIC\n marker"
+        );
     }
 
     #[test]
