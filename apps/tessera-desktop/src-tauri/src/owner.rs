@@ -553,4 +553,40 @@ mod tests {
         );
         assert!(!serialized.to_string().contains("tessera_core"));
     }
+
+    #[test]
+    fn webview_capability_and_production_csp_are_least_privilege() {
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
+            .expect("capability json");
+        assert_eq!(capability["permissions"], serde_json::json!([]));
+
+        let config: Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config json");
+        let production_csp = config["app"]["security"]["csp"]
+            .as_str()
+            .expect("production csp");
+        let development_csp = config["app"]["security"]["devCsp"]
+            .as_str()
+            .expect("development csp");
+        assert!(!production_csp.contains("127.0.0.1"));
+        assert!(!production_csp.contains("ws://"));
+        assert!(development_csp.contains("http://127.0.0.1:1420"));
+        assert!(development_csp.contains("ws://127.0.0.1:1420"));
+
+        let capability_text = capability.to_string();
+        for forbidden in [
+            "core:default",
+            "fs:",
+            "shell:",
+            "sql:",
+            "path:",
+            "image:",
+            "process:",
+        ] {
+            assert!(
+                !capability_text.contains(forbidden),
+                "forbidden permission: {forbidden}"
+            );
+        }
+    }
 }

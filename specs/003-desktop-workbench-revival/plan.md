@@ -68,7 +68,7 @@ apps/tessera-desktop/
 │   ├── views/            # live overview plus preview views
 │   └── *.test.tsx        # behavior and layout tests
 ├── src-tauri/
-│   ├── capabilities/     # core-only Tauri capability allowlist
+│   ├── capabilities/     # empty optional-permission window association
 │   └── src/
 │       ├── lib.rs        # Tauri registration and app lifecycle
 │       └── owner.rs      # testable serialized native session adapter

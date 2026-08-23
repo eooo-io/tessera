@@ -48,6 +48,8 @@ describe('Tessera owner workbench', () => {
     await waitFor(() => expect(ownerClient.openVault).toHaveBeenCalledWith('/synthetic/V.tessera', 'TRANSIENT-PASSPHRASE'))
     expect(screen.queryByLabelText('Passphrase')).not.toBeInTheDocument()
     expect(screen.getByText('Format v3')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toHaveFocus()
+    expect(screen.getByRole('status', { name: '' })).toHaveTextContent('Vault unlocked')
     expect(screen.getByText('7')).toBeInTheDocument()
     expect(screen.queryByText('/synthetic/V.tessera')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Lock vault' }))
@@ -83,17 +85,45 @@ describe('Tessera owner workbench', () => {
 
     await user.click(screen.getByRole('button', { name: 'Lock vault' }))
     expect(screen.queryByText('Format v3')).not.toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Open your vault' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Locking vault' })).toHaveFocus()
     releaseLock.resolve?.({ schema: 'tessera.desktop.lock.v1', state: 'locked' })
+    expect(await screen.findByRole('heading', { name: 'Open your vault' })).toHaveFocus()
+  })
+
+  it('clears protected data but requires restart when native lock is not confirmed', async () => {
+    const user = userEvent.setup()
+    const ownerClient = client({
+      lockVault: vi.fn().mockRejectedValue({ code: 'native_state_unavailable' }),
+    })
+    render(<App ownerClient={ownerClient} />)
+    await fillUnlock(user)
+    expect(await screen.findByText('Format v3')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Lock vault' }))
+    expect(await screen.findByRole('heading', { name: 'Restart Tessera' })).toHaveFocus()
+    expect(screen.getByRole('alert')).toHaveTextContent('native lock could not be confirmed')
+    expect(screen.queryByText('Format v3')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Vault bundle')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Lock vault' })).toBeDisabled()
   })
 
   it('labels every non-overview screen as preview-only and disables its actions', async () => {
     const user = userEvent.setup()
     render(<App ownerClient={client()} />)
-    await user.click(screen.getByRole('button', { name: /Inbox/ }))
-    expect(screen.getByRole('status')).toHaveTextContent('Preview fixtures')
-    expect(screen.getByRole('button', { name: 'Import more' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Accept' })).toBeDisabled()
+    for (const destination of [
+      'Inbox',
+      'Spaces',
+      'Lenses',
+      'Agents',
+      'Sessions',
+      'Receipts',
+      'Evaluation',
+      'Diagnostics',
+    ]) {
+      await user.click(screen.getByRole('button', { name: new RegExp(destination) }))
+      expect(screen.getByText('Preview fixtures.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Preview-only controls')).toBeDisabled()
+    }
   })
 
   it('switches between the packaged light and dark themes', async () => {
@@ -110,9 +140,16 @@ describe('Tessera owner workbench', () => {
     render(<App ownerClient={client()} />)
     await user.tab()
     expect(document.activeElement).toHaveAccessibleName(/Overview/)
-    await user.click(screen.getByRole('button', { name: 'Open navigation' }))
-    expect(screen.getAllByRole('button', { name: 'Close navigation' })).toHaveLength(2)
-    await user.click(screen.getAllByRole('button', { name: 'Close navigation' })[1])
-    expect(screen.queryByRole('button', { name: 'Close navigation' })).not.toBeInTheDocument()
+    const trigger = screen.getByRole('button', { name: 'Open navigation' })
+    trigger.focus()
+    await user.keyboard('{Enter}')
+    const dialog = screen.getByRole('dialog', { name: 'Mobile navigation' })
+    expect(dialog).toBeInTheDocument()
+    await waitFor(() => expect(document.activeElement).toHaveAccessibleName(/Overview/))
+    await user.tab({ shift: true })
+    expect(document.activeElement).toHaveAccessibleName('Close navigation')
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Mobile navigation' })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
   })
 })

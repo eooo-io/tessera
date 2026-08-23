@@ -43,10 +43,16 @@ export function PageHeader({
   action?: React.ReactNode
 }) {
   return (
-    <header className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+    <header className="mb-5 flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
       <div>
         <p className="meta-label mb-1">{eyebrow}</p>
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
+        <h1
+          className="text-2xl font-semibold tracking-tight outline-none sm:text-3xl"
+          data-page-heading
+          tabIndex={-1}
+        >
+          {title}
+        </h1>
         <p className="mt-1 max-w-3xl text-sm text-base-content/62 sm:text-base">{description}</p>
       </div>
       {action}
@@ -104,6 +110,32 @@ export function OverviewView({
   onPathChange,
   onUnlock,
 }: OverviewViewProps) {
+  if (!overview && (vaultState === 'locking' || vaultState === 'restart_required')) {
+    const restartRequired = vaultState === 'restart_required'
+    return (
+      <>
+        <PageHeader
+          eyebrow="Native vault lifecycle"
+          title={restartRequired ? 'Restart Tessera' : 'Locking vault'}
+          description={restartRequired
+            ? 'The protected overview is cleared, but native lock completion could not be confirmed.'
+            : 'Protected overview data is cleared while the native process confirms the lock.'}
+        />
+        <section className={`surface-panel mx-auto max-w-2xl p-5 sm:p-7 ${restartRequired ? 'border-warning/50' : ''}`}>
+          <p className="meta-label">Owner recovery</p>
+          <h2 className="mt-2 text-lg font-semibold">
+            {restartRequired ? 'Close and restart before opening a vault' : 'Lock confirmation in progress'}
+          </h2>
+          <p className="mt-3 text-sm leading-relaxed text-base-content/70" role={restartRequired ? 'alert' : 'status'}>
+            {restartRequired
+              ? error
+              : 'Do not close this window or try another vault operation until confirmation completes.'}
+          </p>
+        </section>
+      </>
+    )
+  }
+
   if (!overview) {
     return (
       <>
@@ -147,6 +179,7 @@ export function OverviewView({
               <input
                 className="input input-bordered mt-2 w-full"
                 type="password"
+                aria-describedby="passphrase-boundary"
                 value={passphrase}
                 onChange={(event) => onPassphraseChange(event.currentTarget.value)}
                 autoComplete="off"
@@ -163,7 +196,7 @@ export function OverviewView({
               {vaultState === 'unlocking' ? 'Unlocking…' : 'Unlock vault'}
             </button>
           </form>
-          <p className="mt-5 text-xs leading-relaxed text-base-content/58">
+          <p id="passphrase-boundary" className="mt-5 text-sm leading-relaxed text-base-content/68">
             The passphrase exists transiently in this owner window, Tauri IPC, and native process memory for this call. It is cleared from the form when the call completes and is never stored or logged by Tessera Desktop.
           </p>
         </section>
@@ -181,7 +214,7 @@ export function OverviewView({
         eyebrow="Live owner workflow"
         title="Overview"
         description="A sanitized aggregate computed by tessera-core. No records, paths, hashes, or receipt payloads cross into the WebView."
-        action={<span className="badge badge-success badge-outline">Live vault aggregate</span>}
+        action={<span className="badge badge-success badge-outline shrink-0 whitespace-nowrap">Live vault aggregate</span>}
       />
 
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-4" aria-label="Live vault summary">

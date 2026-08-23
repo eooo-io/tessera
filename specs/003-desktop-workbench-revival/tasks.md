@@ -24,7 +24,7 @@
 - [X] T011 Implement least-disclosure aggregation through public `tessera-core` APIs in `apps/tessera-desktop/src-tauri/src/owner.rs`
 - [X] T012 Register only capability, open, and lock commands and remove runtime logging in `apps/tessera-desktop/src-tauri/src/lib.rs`
 - [X] T013 Reconcile dependencies and lockfile for zeroization and the narrow command adapter in `apps/tessera-desktop/src-tauri/Cargo.toml`
-- [X] T014 Verify the core-only capability allowlist and CSP in `apps/tessera-desktop/src-tauri/capabilities/default.json` and `apps/tessera-desktop/src-tauri/tauri.conf.json`
+- [X] T014 Verify the empty optional-permission capability and split production/development CSP in `apps/tessera-desktop/src-tauri/capabilities/default.json` and `apps/tessera-desktop/src-tauri/tauri.conf.json`
 
 **Checkpoint**: Native tests prove one deterministic vault lifecycle and closed projection without a WebView.
 

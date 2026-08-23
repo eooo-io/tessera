@@ -32,7 +32,12 @@ Tauri IPC message, and native process memory while `Vault::open` runs. React
 clears the field in `finally` after success or failure. Native Rust wraps its
 owned argument in zeroizing storage. The desktop registers no logging plugin,
 telemetry, persistent unlock token, filesystem plugin, shell plugin, SQL
-endpoint, or general command router.
+endpoint, optional core permission, or general command router. Production CSP
+does not permit the loopback development server.
+
+If native lock confirmation fails, the UI clears the protected overview and
+enters a restart-required state. It does not claim the vault is locked or allow
+another open attempt in that process.
 
 This does not protect the passphrase or DEK from a malicious same-user process
 that can inspect the unlocked application memory. Application exit drops the

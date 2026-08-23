@@ -20,6 +20,11 @@ Any --application exit--> dropped
 
 One mutex serializes transitions. No state variant is serializable or stored on disk.
 
+The presentation layer additionally uses transient `opening`, `locking`, and
+`restart required` states. `Restart required` means the protected projection
+has been cleared but native lock completion was not confirmed; no further open
+is permitted in that process.
+
 ## Sanitized Overview
 
 Closed projection returned only after all aggregate checks complete:

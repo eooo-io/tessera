@@ -1,6 +1,6 @@
 # Native Owner Contract v1
 
-All command names are explicitly registered. Unknown commands fail at the Tauri boundary. The WebView has only `core:default` capability and receives no filesystem or shell permission.
+All command names are explicitly registered. Unknown commands fail at the Tauri boundary. The main window is associated with a capability containing no optional core or plugin permissions and receives no filesystem or shell permission.
 
 ## `desktop_capabilities`
 

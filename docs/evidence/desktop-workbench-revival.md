@@ -23,7 +23,7 @@ blindly.
 
 | Donor area | Disposition | Reason |
 |---|---|---|
-| Tauri 2 crate, icons, config, CSP, and core-only capability | Revived, then command adapter rewritten | Preserve native shell while replacing fixture-only capability discovery with tested open and lock |
+| Tauri 2 crate, icons, config, CSP, and capability association | Revived, then capability and command boundaries tightened | Preserve native shell while replacing fixture-only capability discovery with tested open and lock and removing optional core permissions |
 | React, TypeScript, Vite, Tailwind, DaisyUI, theme package | Revived | Existing responsive design and exact packaged theme remain useful |
 | Overview | Rewritten | It is now the only live view and accepts only `tessera.desktop.overview.v1` |
 | Inbox, spaces, lenses, agents, sessions, receipts, evaluation, diagnostics | Revived as explicit previews | Records remain fixtures; mutation controls are disabled and never report success |
@@ -59,7 +59,7 @@ native owner boundary.
 | Boundary | Exact surface |
 |---|---|
 | Registered commands | `desktop_capabilities`, `open_vault`, `lock_vault` |
-| Main-window capability | `core:default` |
+| Main-window capability | Window association only; empty optional core/plugin permission set |
 | Filesystem, shell, SQL, or generic execution | None |
 | Logging and telemetry plugins | None |
 | Native state | One non-serializable `Vault` inside a mutex; dropped on lock or application exit |
@@ -67,6 +67,10 @@ native owner boundary.
 The frontend adapter validates every result field and rebuilds a closed object,
 discarding unexpected properties. Unknown error payloads are replaced with a
 fixed `internal_failure` message.
+
+Production CSP excludes loopback development origins. The development-only CSP
+adds the fixed Vite HTTP and WebSocket origins. A regression test rejects
+`core:default`, filesystem, shell, SQL, path, image, and process permissions.
 
 ## Secret lifecycle
 
@@ -85,17 +89,19 @@ system, filesystem, SSD, snapshot, or backup layers.
 
 | Layer | Current local evidence | Final requirement |
 |---|---|---|
-| Frontend | Fresh `npm ci`, typecheck, lint, 10 Vitest behavior tests, production build; npm audit reports 0 known vulnerabilities | Repeat only if the final source changes |
+| Frontend | Fresh `npm ci`, typecheck, lint, 11 Vitest behavior tests, production build; npm audit reports 0 known vulnerabilities | Repeat only if the final source changes |
 | Root workspace | Formatting, strict clippy, all-target build, 372 passing all-target tests with 4 expected ignored tests, then all 4 ignored tests passing explicitly | Repeat affected gates if the final source changes |
-| Native boundary | Formatting, locked check, strict nested clippy, and 10 focused Rust tests pass | Repeat affected gates if the final source changes |
+| Native boundary | Formatting, locked check, strict nested clippy, and 11 focused Rust tests pass | Repeat affected gates if the final source changes |
 | Packaged app | Exact debug Tauri command produced the macOS `Tessera.app`; synthetic format-v3 smoke passed | No installer, signing, or distribution claim |
 | Responsive and themes | Manual packaged-app checks at compact, medium, desktop, and wide widths; light/dark, keyboard focus, drawer, vertical scrolling, and no horizontal page scrollbar observed | Automated behavior tests cover semantic structure and breakpoints do not substitute for the manual visual check |
 | Independent review | Pending final commit | Separate security, acceptance, and UX reviews with no blocking findings |
 
+The first independent review round was bound to candidate `eff113a1f5163f3d9909ca13e89573df5053cbe6` and deliberately did not pass. It identified an overbroad `core:default` capability, development loopback origins in the production CSP, a falsely reassuring UI state after native lock failure, incomplete drawer keyboard semantics, incomplete lifecycle focus and announcement behavior, and insufficiently durable responsive evidence. The corrected candidate removes the optional capability grants, splits development and production CSP, enters a restart-required state after unconfirmed lock, traps and restores drawer focus with Escape support, focuses and announces lifecycle transitions, exercises all eight preview screens, and retains synthetic-only screenshots. Final independent review is required against the exact corrected commit.
+
 The final controlled ignored-performance run recorded: 10,000-artifact listing
-within its 100 ms budget; 19.30 ms per embedding chunk; 681 ms legacy
-migration; 1.17 ms median top-10 query; 25 ms diagnostics; 173 ms repair;
-947 ms backup; and 107 ms restore. These are development-machine measurements,
+within its 100 ms budget; 18.97 ms per embedding chunk; 674 ms legacy
+migration; 1.16 ms median top-10 query; 26 ms diagnostics; 166 ms repair;
+888 ms backup; and 108 ms restore. These are development-machine measurements,
 not cross-platform service level guarantees.
 
 A deliberately parallel validation attempt materially distorted two budgets
@@ -125,11 +131,25 @@ vault was opened.
 | Live overview | Format 3, 1 space, 0 pending items, 0 active sessions, 1 verified receipt, healthy bounded diagnostics |
 | Explicit lock | Live projection cleared immediately; empty path and passphrase fields returned; repeated lock remains covered by native and frontend tests |
 | Theme and focus | Light and dark themes rendered; keyboard Tab produced a visible focus ring on the lock control |
-| Preview honesty | Inbox carried a persistent preview warning; every fixture mutation and filter control was disabled |
-| Responsive layout | Drawer/navigation and aggregate layout inspected at compact, medium, desktop, and wide widths; vertical scrolling appeared where expected and no horizontal page scrollbar was present |
+| Preview honesty | Inbox carried a persistent preview warning; every fixture mutation and filter control was disabled; behavior tests visit all eight preview screens |
+| Responsive layout | Drawer/navigation and aggregate layout inspected at 423, 769, 1025, and 1229 pixel captured widths; vertical scrolling appeared where expected and no horizontal page scrollbar was present |
 | Exit | Application was explicitly locked before the packaged window closed; native state-drop behavior is independently covered by Rust test |
 
-The disposable synthetic smoke bundle was not retained as project evidence.
+Retained synthetic-only visual evidence:
+
+- [Locked wide view](desktop-workbench-smoke/locked-dark.png)
+- [Live wide dark view](desktop-workbench-smoke/wide-dark-live.png)
+- [Live wide light view](desktop-workbench-smoke/wide-light-live.png)
+- [Live desktop view](desktop-workbench-smoke/desktop-dark-live.png)
+- [Live medium view](desktop-workbench-smoke/medium-dark-live.png)
+- [Live compact view](desktop-workbench-smoke/compact-dark-live.png)
+- [Compact navigation drawer](desktop-workbench-smoke/compact-drawer.png)
+- [Compact preview-only inbox](desktop-workbench-smoke/compact-inbox-preview.png)
+
+The drawer was opened by keyboard, trapped focus, closed with Escape, and
+returned focus to its trigger. Explicit lock removed the live aggregate and
+returned an empty path and passphrase form. The disposable synthetic smoke
+bundle was removed and was not retained as project evidence.
 
 ## Platform CI
 
@@ -145,6 +165,9 @@ The disposable synthetic smoke bundle was not retained as project evidence.
 - Passphrase entry crosses the owner WebView and Tauri IPC transiently.
 - Unlock runs as one serialized native command and can occupy its command
   execution thread for the KDF and bounded aggregate checks.
+- A hostile but structurally valid bundle can select extreme KDF parameters in
+  the inherited core format and consume excessive CPU or memory. Defining new
+  compatible KDF bounds is a core format-policy decision outside this revival.
 - The overview provides aggregate state only. It does not refresh when another
   process changes the vault; relock and reopen refreshes it.
 - Receipt-chain failure is reported only as `invalid` with count zero; detailed

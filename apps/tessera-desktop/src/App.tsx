@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Info } from 'lucide-react'
 import { AppShell } from './components/AppShell'
 import { inboxItems, sessions } from './data/demo'
@@ -30,6 +30,14 @@ function App({ ownerClient = nativeOwnerClient }: AppProps) {
   const [passphrase, setPassphrase] = useState('')
   const [overview, setOverview] = useState<SanitizedOverview | null>(null)
   const [ownerError, setOwnerError] = useState<string | null>(null)
+  const [announcement, setAnnouncement] = useState('Vault locked.')
+  const [focusRevision, setFocusRevision] = useState(0)
+
+  useEffect(() => {
+    if (focusRevision > 0) {
+      document.querySelector<HTMLElement>('[data-page-heading]')?.focus()
+    }
+  }, [focusRevision])
 
   const toggleTheme = () => {
     const next = !dark
@@ -48,6 +56,8 @@ function App({ ownerClient = nativeOwnerClient }: AppProps) {
       setOverview(result)
       setVaultPath('')
       setVaultState('unlocked')
+      setAnnouncement('Vault unlocked. Sanitized overview available.')
+      setFocusRevision((revision) => revision + 1)
     } catch (error) {
       setOverview(null)
       setVaultState('locked')
@@ -60,12 +70,20 @@ function App({ ownerClient = nativeOwnerClient }: AppProps) {
   const lock = async () => {
     if (vaultState !== 'unlocked') return
     setOverview(null)
-    setVaultState('locked')
+    setVaultState('locking')
     setOwnerError(null)
+    setAnnouncement('Locking vault. Protected overview cleared.')
+    setFocusRevision((revision) => revision + 1)
     try {
       await ownerClient.lockVault()
-    } catch (error) {
-      setOwnerError(normalizeOwnerError(error).message)
+      setVaultState('locked')
+      setAnnouncement('Vault locked. Protected overview cleared.')
+      setFocusRevision((revision) => revision + 1)
+    } catch {
+      setVaultState('restart_required')
+      setOwnerError('The native lock could not be confirmed. Close and restart Tessera before opening a vault.')
+      setAnnouncement('Native lock could not be confirmed. Restart Tessera.')
+      setFocusRevision((revision) => revision + 1)
     }
   }
 
@@ -100,18 +118,21 @@ function App({ ownerClient = nativeOwnerClient }: AppProps) {
   )
 
   return (
-    <AppShell
-      active={active}
-      dark={dark}
-      drawerOpen={drawerOpen}
-      vaultState={vaultState}
-      onDrawerChange={setDrawerOpen}
-      onLock={lock}
-      onNavigate={setActive}
-      onToggleTheme={toggleTheme}
-    >
-      {content}
-    </AppShell>
+    <>
+      <div className="sr-only" role="status" aria-live="polite">{announcement}</div>
+      <AppShell
+        active={active}
+        dark={dark}
+        drawerOpen={drawerOpen}
+        vaultState={vaultState}
+        onDrawerChange={setDrawerOpen}
+        onLock={lock}
+        onNavigate={setActive}
+        onToggleTheme={toggleTheme}
+      >
+        {content}
+      </AppShell>
+    </>
   )
 }
 

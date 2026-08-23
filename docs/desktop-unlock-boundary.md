@@ -58,7 +58,7 @@ repair, back up, or expose data through Guardian.
 
 | Surface | Allowed |
 |---|---|
-| Tauri capability | `core:default` for the main window |
+| Tauri capability | Main-window association with an empty optional core/plugin permission set |
 | Registered commands | `desktop_capabilities`, `open_vault`, `lock_vault` |
 | Filesystem plugin | No |
 | Shell or process plugin | No |
@@ -68,3 +68,9 @@ repair, back up, or expose data through Guardian.
 
 Adding a command or permission requires a new owner-workflow slice, explicit
 contract tests, capability review, and updated evidence.
+
+Production CSP permits packaged resources and Tauri IPC only. Fixed loopback
+HTTP and WebSocket origins are confined to the development CSP. If native lock
+completion cannot be confirmed, React clears the protected projection but
+enters `restart required`; it neither claims the vault is locked nor permits a
+new open attempt in that process.

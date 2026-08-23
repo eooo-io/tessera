@@ -94,7 +94,7 @@ As the vault owner, I want the desktop shell to remain usable across supported w
 - **FR-007**: Owner-visible failures MUST use a typed, bounded error contract whose code and guidance contain no owner path, passphrase, database detail, hash, receipt identifier, private metadata, stack trace, or source error text.
 - **FR-008**: A successful open MUST return only lock state, vault format version, space count, pending-review count, active-session count, receipt-chain verification status and aggregate count, and bounded diagnostic status.
 - **FR-009**: The overview MUST NOT return document content, filenames, titles, tags, source URLs, logical hashes, blob addresses, receipt payloads or identifiers, database rows, cryptographic material, private evaluation content, or owner filesystem paths.
-- **FR-010**: Explicit lock MUST drop native unlocked state and immediately remove the live overview from the presentation layer; repeated lock MUST be safe.
+- **FR-010**: Explicit lock MUST drop native unlocked state and immediately remove the live overview from the presentation layer; repeated lock MUST be safe, and an unconfirmed native lock MUST enter a restart-required state without claiming success or permitting another open.
 - **FR-011**: Concurrent open and lock requests MUST serialize to one unambiguous state, and a second open MUST NOT replace an already unlocked vault.
 - **FR-012**: Application exit MUST drop all native unlocked state without persisting recovery tokens or cached secrets.
 - **FR-013**: The passphrase MUST be cleared from presentation state immediately after every invocation and MUST NOT enter logs, storage, telemetry, crash text, fixtures, generated artifacts, or error output.

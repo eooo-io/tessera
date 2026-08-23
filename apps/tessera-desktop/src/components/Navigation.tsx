@@ -79,7 +79,7 @@ export function Navigation({ active, vaultState, onSelect, mobile = false }: Nav
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-sm font-medium">My Vault</p>
-            <p className="mt-1 text-xs text-base-content/55">Local · {vaultState}</p>
+            <p className="mt-1 text-xs text-base-content/55">Local · {vaultState.replace('_', ' ')}</p>
           </div>
           <span
             className={`status ${vaultState === 'unlocked' ? 'status-success' : 'status-neutral'}`}

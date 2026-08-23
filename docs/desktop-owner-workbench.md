@@ -61,7 +61,7 @@ successful mutations, or release readiness.
 
 ## Responsive baseline
 
-- Compact: 320 to 639 CSS pixels. Navigation uses an explicit modal drawer,
+- Compact: 360 to 639 CSS pixels in the packaged app. Navigation uses an explicit modal drawer,
   actions wrap, and content panels stack in workflow order.
 - Medium: 640 to 1023 CSS pixels. Summary grids use two columns where readable;
   navigation remains compact.

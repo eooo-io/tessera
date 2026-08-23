@@ -40,7 +40,12 @@ export interface ToastMessage {
   text: string
 }
 
-export type VaultUiState = 'locked' | 'unlocking' | 'unlocked'
+export type VaultUiState =
+  | 'locked'
+  | 'unlocking'
+  | 'unlocked'
+  | 'locking'
+  | 'restart_required'
 
 export type ReceiptChainStatus = 'verified' | 'invalid'
 export type DiagnosticStatus = 'healthy' | 'attention' | 'fatal'
