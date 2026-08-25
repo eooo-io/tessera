@@ -8,7 +8,12 @@ To start or resume work, tell Claude: **"Execute GOAL.md."**
 Work through the GitHub milestones continuously until **v0.1.0** — the first
 stable version — exists: an encrypted, portable personal context vault with
 policy-gated semantic retrieval over a text corpus, hash-chained access
-receipts, and agent access via an MCP guardian.
+receipts, and agent access via an MCP guardian. The owner workbench is the
+Tauri 2 + React app at `apps/tessera-desktop/`: live workflow is open a
+current format-v3 vault, view a sanitized aggregate, and explicitly lock.
+Other owner screens are labeled previews. `mac/` is a preserved dormant
+SwiftUI placeholder, not the app. CI and protected-bundle interchange run
+on macOS and Ubuntu.
 
 **v0.1.0 = all issues in milestones M1 through M6 closed**, the v0.0 decision
 gate passed, and the release checklist (below) green. M7 (multimodal) is
@@ -16,7 +21,7 @@ v0.2.0 — do not start it under this goal.
 
 ## Sources of truth (in precedence order)
 
-1. `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` — the design
+1. `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` — the design (2026-07-04 "Mac app deferred" / macOS-only-dev notes are historical; current desktop is `docs/desktop-owner-workbench.md`)
 2. GitHub issues/milestones on `eooo-io/tessera` — the work breakdown; each issue's acceptance criteria are its definition of done
 3. `CLAUDE.md` — conventions (error handling, IDs, no-unwrap rule, test placement)
 4. `Tessera-MVP-Plan-v3.md` — reference only for crypto params, lens semantics, sensitivity levels, performance budgets; superseded elsewhere

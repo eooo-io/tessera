@@ -11,7 +11,7 @@
 
 **Curate your context. Control your agents. Prove what happened.**
 
-A Mac-first personal context vault with policy-gated semantic retrieval — the trust substrate for agentic AI.
+A portable personal context vault with policy-gated semantic retrieval — the trust substrate for agentic AI. The vault, CLI, and guardian run on macOS and Ubuntu; CI and protected-bundle interchange cover both.
 
 Tessera lets you curate what matters, then grant AI agents a narrow, owner-approved lens with exact disclosure receipts. The declared purpose is audit context, not a semantic firewall. The name draws from the Roman *tessera*: a physical token that represented specific access granted by a specific authority.
 
@@ -244,7 +244,7 @@ limits are documented in
 │   └── tessera-desktop/      # Tauri + React owner workbench
 ├── mac/                      # Preserved dormant SwiftUI placeholder
 ├── spec/                     # OpenAPI spec, JSON schemas
-├── Tessera-MVP-Plan-v3.md    # Authoritative MVP plan
+├── Tessera-MVP-Plan-v3.md    # Crypto, lens, sensitivity, and budget reference
 └── tests/                    # Integration tests and fixtures
 ```
 

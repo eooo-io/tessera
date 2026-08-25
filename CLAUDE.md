@@ -2,16 +2,20 @@
 
 ## Project
 
-Tessera — Rust monorepo for a Mac-first personal context vault with policy-gated semantic retrieval.
+Tessera — Rust monorepo for a portable personal context vault with
+policy-gated semantic retrieval. The vault, CLI, and guardian run on macOS
+and Ubuntu; CI and protected-bundle interchange cover both.
 
 ## Structure
 
 - `crates/tessera-core/` — library crate (all domain logic)
 - `crates/tessera-guardian/` — binary crate (the guardian: MCP server daemon, the only agent-facing entry to a vault)
 - `crates/tessera-cli/` — binary crate (CLI, ships as `tessera`)
-- `mac/` — SwiftUI Mac app (placeholder)
+- `apps/tessera-desktop/` — Tauri 2 + React owner workbench. Live workflow: open a current format-v3 vault, view a sanitized aggregate overview, and explicitly lock. Other owner screens are labeled previews.
+- `mac/` — preserved dormant SwiftUI placeholder (not the app)
 - `spec/` — OpenAPI spec, JSON schemas
-- `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` — Authoritative design (architecture, sequencing)
+- `docs/desktop-owner-workbench.md` — current desktop decision and live/preview boundary
+- `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` — Authoritative design (architecture, sequencing). The 2026-07-04 "Mac app deferred" / macOS-only-dev notes are historical; see the desktop doc for the current workbench.
 - `Tessera-MVP-Plan-v3.md` — Reference for crypto params, lens semantics, sensitivity levels, performance budgets (architecture/sequencing sections superseded)
 - `tests/` — Integration tests and fixtures
 
@@ -25,6 +29,10 @@ cargo fmt --check                  # format check
 cargo clippy -- -D warnings        # lint
 ```
 
+Workspace CI runs that suite on macOS and Ubuntu, plus protected-vault
+interchange between them. Desktop UI and native-boundary jobs live under
+`apps/tessera-desktop/` (see that app's README).
+
 ## Conventions
 
 - **Error handling**: `thiserror` for library errors in core, `anyhow` in binary crates.
@@ -35,10 +43,10 @@ cargo clippy -- -D warnings        # lint
 - **Naming**: snake_case for files/modules. PascalCase for structs/enums/variants.
 - **Public API**: Each module directory has `mod.rs` with the public surface. `lib.rs` re-exports top-level types.
 - **Traits**: `EmbeddingProvider` and `VectorIndex` are trait-based for implementation swapping.
-- **Crypto**: XChaCha20-Poly1305 for blobs. Argon2id for key derivation. macOS Keychain for key storage.
+- **Crypto**: XChaCha20-Poly1305 for blobs. Argon2id for key derivation. Passphrase unlock is the portable path; macOS Keychain is optional convenience, never a requirement.
 - **No unwrap in lib code**: Use `expect()` only in tests and binary entry points with clear messages.
 - **Dependencies**: Shared versions pinned in workspace `Cargo.toml`. Crates use `workspace = true`.
 
 ## Spec Reference
 
-The authoritative design is `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md`; work items live in GitHub milestones M1–M7 (see `GOAL.md`). `Tessera-MVP-Plan-v3.md` remains the reference for crypto parameters, lens semantics, sensitivity levels, and performance budgets.
+The authoritative design is `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md`; work items live in GitHub milestones M1–M7 (see `GOAL.md`). `Tessera-MVP-Plan-v3.md` remains the reference for crypto parameters, lens semantics, sensitivity levels, and performance budgets. The owner workbench is documented in `docs/desktop-owner-workbench.md`.
