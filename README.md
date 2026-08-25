@@ -2,8 +2,8 @@
 
 [![Rust](https://img.shields.io/badge/Rust-DEA584?style=for-the-badge&logo=rust&logoColor=000000)](https://www.rust-lang.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![SwiftUI](https://img.shields.io/badge/SwiftUI-F05138?style=for-the-badge&logo=swift&logoColor=white)](https://developer.apple.com/xcode/swiftui/)
-[![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Tauri](https://img.shields.io/badge/Tauri-24C8DB?style=for-the-badge&logo=tauri&logoColor=white)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://react.dev/)
 [![Axum](https://img.shields.io/badge/Axum-E6522C?style=for-the-badge&logo=rust&logoColor=white)](https://github.com/tokio-rs/axum)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-005CED?style=for-the-badge&logo=onnx&logoColor=white)](https://onnxruntime.ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-F5C518?style=for-the-badge)](LICENSE)
@@ -31,7 +31,11 @@ Tessera lets you curate what matters, then grant AI agents a narrow, owner-appro
 | `tessera-guardian` | Binary | MCP guardian — stdio plus OAuth-protected Streamable HTTP, purpose/lens sessions, and exact receipts |
 | `tessera-cli` | Binary | Command-line interface for vault operations, evaluation harness, diagnostics |
 
-A **SwiftUI Mac app** (`mac/`) provides the desktop interface for spaces, lens building, agent grant dialogs, session monitoring, and receipt viewing.
+A responsive **Tauri owner workbench** (`apps/tessera-desktop/`) provides one
+live native workflow: open a current format-v3 vault, view a sanitized aggregate,
+and explicitly lock it. Its other screens remain labeled presentation previews.
+Native owner commands are narrowly scoped, `tessera-core` remains the domain
+source of truth, and agents continue to use Guardian MCP.
 
 ## Key Concepts
 
@@ -56,6 +60,11 @@ cargo clippy -- -D warnings
 
 # Run the CLI
 cargo run -p tessera-cli -- --help
+
+# Run the desktop owner workbench
+cd apps/tessera-desktop
+npm ci
+npm run tauri dev
 
 # Run the guardian with a no-echo owner prompt
 cargo run -p tessera-guardian -- --vault /path/V.tessera \
@@ -231,7 +240,9 @@ limits are documented in
 │   ├── tessera-core/         # Domain logic library
 │   ├── tessera-guardian/      # Localhost HTTP daemon
 │   └── tessera-cli/          # CLI binary
-├── mac/                      # SwiftUI Mac app
+├── apps/
+│   └── tessera-desktop/      # Tauri + React owner workbench
+├── mac/                      # Preserved dormant SwiftUI placeholder
 ├── spec/                     # OpenAPI spec, JSON schemas
 ├── Tessera-MVP-Plan-v3.md    # Authoritative MVP plan
 └── tests/                    # Integration tests and fixtures
