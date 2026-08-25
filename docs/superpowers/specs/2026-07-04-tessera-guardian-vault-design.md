@@ -4,6 +4,8 @@
 **Status:** Approved direction (sections 1–2 reviewed interactively; sections 3–7 derived from the same decision session)
 **Supersedes:** the architecture/sequencing portions of `Tessera-MVP-Plan-v3.md`. The v3 plan remains the reference for crypto parameters, lens schema semantics, sensitivity levels, and performance budgets except where this document overrides it.
 
+**Desktop (post-2026-07-04):** the owner workbench is Tauri 2 + React at `apps/tessera-desktop/` (`docs/desktop-owner-workbench.md`). Live workflow: open a current format-v3 vault, sanitized aggregate overview, explicit lock; other owner screens are labeled previews. `mac/` remains a preserved dormant SwiftUI placeholder. CI and protected-bundle interchange run on macOS and Ubuntu. Session notes below that deferred a Mac app or treated macOS as the only tested target are historical.
+
 ## Vision
 
 A portable, media-agnostic personal context vault — a self-curated "semblance" of its owner — that can move to any runtime substrate while retaining owner-controlled access and complete, tamper-evident records of every disclosure, especially disclosures to LLMs and agents.

@@ -1,6 +1,6 @@
 # TESSERA
 
-> **⚠️ Partially superseded (2026-07-05):** architecture, gateway API, and iteration sequencing are superseded by `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` (guardian/MCP model) and the GitHub milestones. This document remains authoritative for crypto parameters, lens policy semantics, sensitivity levels, and performance budgets.
+> **⚠️ Partially superseded (2026-07-05):** architecture, gateway API, and iteration sequencing are superseded by `docs/superpowers/specs/2026-07-04-tessera-guardian-vault-design.md` (guardian/MCP model) and the GitHub milestones. This document remains authoritative for crypto parameters, lens policy semantics, sensitivity levels, and performance budgets. The SwiftUI `tessera-mac` / `mac/` app described below is not the current desktop; the owner workbench is Tauri 2 + React at `apps/tessera-desktop/` (`docs/desktop-owner-workbench.md`). CI and vault portability run on macOS and Ubuntu.
 
 ## MVP Implementation Plan
 

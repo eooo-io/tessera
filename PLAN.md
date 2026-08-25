@@ -1,6 +1,6 @@
 # Tessera — Development Roadmap
 
-> **Note (2026-07-05):** execution now tracks GitHub milestones M1–M7 (see `GOAL.md` and the design doc in `docs/superpowers/specs/`). Checkboxes below are kept roughly in sync; milestone/issue state on GitHub is authoritative. Guardian (MCP) replaces the REST gateway; M6=Guardian, M7=Multimodal.
+> **Note (2026-07-05):** execution now tracks GitHub milestones M1–M7 (see `GOAL.md` and the design doc in `docs/superpowers/specs/`). Checkboxes below are kept roughly in sync; milestone/issue state on GitHub is authoritative. Guardian (MCP) replaces the REST gateway; M6=Guardian, M7=Multimodal. The owner workbench is Tauri 2 + React at `apps/tessera-desktop/` (see Iteration 7), not SwiftUI. CI and vault portability run on macOS and Ubuntu.
 
 ## Iteration 0: Scaffolding
 - [x] Repo cleanup — remove legacy files, submodules
@@ -70,16 +70,15 @@
 
 **Exit criteria**: Mock agent can register, pair, query, and be revoked. Sessions expire at TTL.
 
-## Iteration 7: Mac App
-- [ ] SwiftUI shell with vault picker and unlock
-- [ ] Spaces sidebar (tree view) and artifact list
-- [ ] Import via drag-drop and file dialog
-- [ ] Lens builder wizard
-- [ ] Agent grant dialog with approval flow
-- [ ] Live session monitor with activity stream
-- [ ] Receipt viewer with artifact links and export
+## Iteration 7: Owner workbench
+- [x] Tauri 2 + React workbench at `apps/tessera-desktop/`
+- [x] Open an existing current format-v3 vault
+- [x] Sanitized aggregate overview
+- [x] Explicit lock
+- [ ] Remaining owner screens (inbox, spaces, lenses, agents, sessions, receipts, evaluation, diagnostics) stay labeled previews until they have native backing
+- `mac/` remains a preserved dormant SwiftUI placeholder; it is not the app
 
-**Exit criteria**: Full end-to-end user story works from import through receipt review.
+**Exit criteria**: The owner can open a current format-v3 vault, read the sanitized aggregate, and lock it from the workbench. Preview screens do not claim live data or successful mutations.
 
 ## Iteration 8: Hardening and Ship
 - [ ] Transaction wrapping, WAL checkpoint management
@@ -93,7 +92,7 @@
 - [ ] `tessera diag` diagnostics command
 - [ ] Schema versioning for vault migration
 
-**Exit criteria**: Fresh install works on macOS 13+. All performance budgets met. No P0 bugs.
+**Exit criteria**: Fresh install works on macOS 13+. CI and protected-bundle interchange remain green on Ubuntu as well as macOS. All performance budgets met. No P0 bugs.
 
 ---
 
@@ -119,4 +118,5 @@ Every iteration includes tests at all relevant layers:
 - [ ] Recall@10 > 0.80 on golden evaluation set
 - [ ] All performance budgets met
 - [ ] Fresh install works on macOS 13+
+- [ ] CI and vault portability remain green on Ubuntu as well as macOS
 - [ ] No P0 bugs remaining

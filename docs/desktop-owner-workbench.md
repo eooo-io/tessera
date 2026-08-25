@@ -6,14 +6,16 @@ Revival baseline: 2026-08-23
 
 ## Decision continuity
 
-Tessera uses a Mac-first, cross-platform owner workbench built with Tauri 2,
+Tessera uses a cross-platform owner workbench built with Tauri 2,
 React, TypeScript, Vite, Tailwind CSS 4, and DaisyUI 5. The UI consumes the
 packaged `@eooo-io/theme` snapshot and supports `eooo-light` and `eooo-dark`.
+CI covers the frontend on Ubuntu and the native boundary on macOS and Ubuntu.
 
-This remains the approved replacement for the dormant SwiftUI direction. The
-preserved donor implementation at `50a830f3c08874e990d588291220328c7fceb13c`
-was recovered onto post-#89 main `488560894d188f97f2365e56cfdc4853a1ad2f00`.
-The donor itself remains an immutable source artifact.
+This remains the approved replacement for the dormant SwiftUI direction.
+`mac/` is a preserved placeholder, not the app. The donor implementation at
+`50a830f3c08874e990d588291220328c7fceb13c` was recovered onto post-#89 main
+`488560894d188f97f2365e56cfdc4853a1ad2f00`. The donor itself remains an
+immutable source artifact.
 
 No new ADR is needed. The original architecture is unchanged; this revival
 adds the format-v3, protected-receipt, and explicit secret-lifecycle constraints
